@@ -5,6 +5,7 @@ from pkg_resources import resource_filename
 
 # files
 TEST_CONFIG = resource_filename("gramps_webapi", "data/test.cfg")
+TEST_EXAMPLE_CONFIG = resource_filename("gramps_webapi", "data/test_example.cfg")
 TEST_AUTH_CONFIG = resource_filename("gramps_webapi", "data/test_auth.cfg")
 
 # environment variables
