@@ -1,5 +1,10 @@
 FROM dmstraub/gramps-webapi:latest
 
+# create non-root user and grant privileges
+RUN useradd -m appuser
+RUN chown -R appuser:appuser /app
+USER appuser
+
 # copy config file
 COPY config.cfg /app/config/
 
