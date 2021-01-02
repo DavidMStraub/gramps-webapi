@@ -12,7 +12,7 @@ COPY config.cfg /app/config/
 ENV GRAMPS_RESOURCES /usr/share/
 RUN cp -r /usr/share/doc/gramps/example/gramps/example.gramps.gz .
 RUN gunzip example.gramps.gz
-RUN gramps -C Example -i example.gramps --config=database.backend:sqlite
+RUN gramps -C Example -i example.gramps --config=database.backend:sqlite --config=database.path:/app/.gramps/grampsdb
 RUN rm -rf appcache
 
 # build full-text search index
