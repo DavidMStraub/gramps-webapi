@@ -26,15 +26,16 @@ from celery import shared_task
 from celery.result import AsyncResult
 from flask import current_app
 
+from ..auth import get_owner_emails
 from .emails import email_confirm_email, email_new_user, email_reset_pw
 from .export import prepare_options, run_export
 from .resources.util import run_import
 from .util import (
     get_config,
     get_db_manager,
+    get_db_outside_request,
     get_search_indexer,
     send_email,
-    get_db_outside_request,
 )
 
 
@@ -79,8 +80,7 @@ def send_email_new_user(username: str, fullname: str, email: str, tree: str):
         base_url=base_url, username=username, fullname=fullname, email=email
     )
     subject = _("New registered user")
-    auth = current_app.config.get("AUTH_PROVIDER")
-    emails = auth.get_owner_emails(tree=tree)
+    emails = get_owner_emails(tree=tree)
     if emails:
         send_email(subject=subject, body=body, to=emails)
 
