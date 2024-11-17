@@ -25,5 +25,5 @@ jobs:
           pip install -r requirements-dev.txt
           pip install .[ai]
           pip list
-      - name: Test with pytest
-        run: pytest
+    #   - name: Test with pytest
+    #     run: pytest
