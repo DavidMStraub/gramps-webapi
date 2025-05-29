@@ -1,7 +1,7 @@
 swagger: "2.0"
 info:
   title: "Gramps Web API"
-  version: "2.5.0"
+  version: "3.1.0"
   description: >
     The Gramps Web API is a REST API that provides access to family tree databases generated and maintained with Gramps, a popular Open Source genealogical research software package.
 
@@ -778,7 +778,7 @@ paths:
           {"function": function, "invert": invert, "rules": [{"name": name, "values": [values], "regex": regex}]}
 
 
-          The function value is a string for the logical operation. Valid values are 'and', 'or', 'xor' and 'one'. If not present the default is 'and'.
+          The function value is a string for the logical operation. Valid values are 'and', 'or' and 'one'. If not present the default is 'and'.
 
 
           The invert value is a boolean, true or false, that indicates if the results should be inverted. If not present the default is false.
@@ -1294,6 +1294,12 @@ paths:
         required: false
         type: string
         description: "Specifies the locale to be used where applicable if one other than the current default is desired. Should be a valid language code from the available list of translations."
+      - name: raw
+        in: query
+        required: false
+        type: boolean
+        default: false
+        description: "Indicates whether to include the raw data for the matches or not."
       responses:
         200:
           description: "OK: Successful operation."
@@ -1374,7 +1380,7 @@ paths:
           {"function": function, "invert": invert, "rules": [{"name": name, "values": [values], "regex": regex}]}
 
 
-          The function value is a string for the logical operation. Valid values are 'and', 'or', 'xor' and 'one'. If not present the default is 'and'.
+          The function value is a string for the logical operation. Valid values are 'and', 'or' and 'one'. If not present the default is 'and'.
 
 
           The invert value is a boolean, true or false, that indicates if the results should be inverted. If not present the default is false.
@@ -1855,7 +1861,7 @@ paths:
           {"function": function, "invert": invert, "rules": [{"name": name, "values": [values], "regex": regex}]}
 
 
-          The function value is a string for the logical operation. Valid values are 'and', 'or', 'xor' and 'one'. If not present the default is 'and'.
+          The function value is a string for the logical operation. Valid values are 'and', 'or' and 'one'. If not present the default is 'and'.
 
 
           The invert value is a boolean, true or false, that indicates if the results should be inverted. If not present the default is false.
@@ -2242,7 +2248,7 @@ paths:
           {"function": function, "invert": invert, "rules": [{"name": name, "values": [values], "regex": regex}]}
 
 
-          The function value is a string for the logical operation. Valid values are 'and', 'or', 'xor' and 'one'. If not present the default is 'and'.
+          The function value is a string for the logical operation. Valid values are 'and', 'or' and 'one'. If not present the default is 'and'.
 
 
           The invert value is a boolean, true or false, that indicates if the results should be inverted. If not present the default is false.
@@ -2571,7 +2577,7 @@ paths:
           {"function": function, "invert": invert, "rules": [{"name": name, "values": [values], "regex": regex}]}
 
 
-          The function value is a string for the logical operation. Valid values are 'and', 'or', 'xor' and 'one'. If not present the default is 'and'.
+          The function value is a string for the logical operation. Valid values are 'and', 'or' and 'one'. If not present the default is 'and'.
 
 
           The invert value is a boolean, true or false, that indicates if the results should be inverted. If not present the default is false.
@@ -2888,7 +2894,7 @@ paths:
           {"function": function, "invert": invert, "rules": [{"name": name, "values": [values], "regex": regex}]}
 
 
-          The function value is a string for the logical operation. Valid values are 'and', 'or', 'xor' and 'one'. If not present the default is 'and'.
+          The function value is a string for the logical operation. Valid values are 'and', 'or' and 'one'. If not present the default is 'and'.
 
 
           The invert value is a boolean, true or false, that indicates if the results should be inverted. If not present the default is false.
@@ -3177,7 +3183,7 @@ paths:
           {"function": function, "invert": invert, "rules": [{"name": name, "values": [values], "regex": regex}]}
 
 
-          The function value is a string for the logical operation. Valid values are 'and', 'or', 'xor' and 'one'. If not present the default is 'and'.
+          The function value is a string for the logical operation. Valid values are 'and', 'or' and 'one'. If not present the default is 'and'.
 
 
           The invert value is a boolean, true or false, that indicates if the results should be inverted. If not present the default is false.
@@ -3478,7 +3484,7 @@ paths:
           {"function": function, "invert": invert, "rules": [{"name": name, "values": [values], "regex": regex}]}
 
 
-          The function value is a string for the logical operation. Valid values are 'and', 'or', 'xor' and 'one'. If not present the default is 'and'.
+          The function value is a string for the logical operation. Valid values are 'and', 'or' and 'one'. If not present the default is 'and'.
 
 
           The invert value is a boolean, true or false, that indicates if the results should be inverted. If not present the default is false.
@@ -4171,7 +4177,7 @@ paths:
           {"function": function, "invert": invert, "rules": [{"name": name, "values": [values], "regex": regex}]}
 
 
-          The function value is a string for the logical operation. Valid values are 'and', 'or', 'xor' and 'one'. If not present the default is 'and'.
+          The function value is a string for the logical operation. Valid values are 'and', 'or' and 'one'. If not present the default is 'and'.
 
 
           The invert value is a boolean, true or false, that indicates if the results should be inverted. If not present the default is false.
@@ -4691,6 +4697,11 @@ paths:
           required: false
           type: boolean
           description: "If true, force applying the transaction even if objects have been modified."
+        - name: background
+          in: query
+          required: false
+          type: boolean
+          description: "If true, the transactions will be applied in the background and status 202 will be returned."
         - in: body
           name: source
           description: The database transaction
@@ -4705,6 +4716,13 @@ paths:
             type: array
             items:
               $ref: "#/definitions/Transaction"
+        202:
+          description: "Accepted: transactions will be applied in the background."
+          schema:
+            type: object
+            properties:
+              task:
+                $ref: "#/definitions/TaskReference"
         400:
           description: "Bad Request: Malformed request could not be parsed."
         401:
@@ -5773,7 +5791,7 @@ paths:
           {"function": function, "invert": invert, "rules": [{"name": name, "values": [values], "regex": regex}]}
 
 
-          The function value is a string for the logical operation. Valid values are 'and', 'or', 'xor' and 'one'. If not present the default is 'and'.
+          The function value is a string for the logical operation. Valid values are 'and', 'or' and 'one'. If not present the default is 'and'.
 
 
           The invert value is a boolean, true or false, that indicates if the results should be inverted. If not present the default is false.
@@ -5943,7 +5961,7 @@ paths:
           {"function": function, "invert": invert, "rules": [{"name": name, "values": [values], "regex": regex}]}
 
 
-          The function value is a string for the logical operation. Valid values are 'and', 'or', 'xor' and 'one'. If not present the default is 'and'.
+          The function value is a string for the logical operation. Valid values are 'and', 'or' and 'one'. If not present the default is 'and'.
 
 
           The invert value is a boolean, true or false, that indicates if the results should be inverted. If not present the default is false.
@@ -7114,6 +7132,37 @@ paths:
             $ref: "#/definitions/Metadata"
         401:
           description: "Unauthorized: Missing authorization header."
+
+
+##############################################################################
+# Endpoint - Parsers
+##############################################################################
+
+  /parsers/dna-match:
+    post:
+      tags:
+      - parsers
+      summary: "Parse a DNA match file."
+      operationId: parseDnaMatch
+      security:
+        - Bearer: []
+      parameters:
+      - name: string
+        in: json
+        required: true
+        type: string
+        description: "The raw DNA match data to parse."
+      responses:
+        200:
+          description: "OK: sucessfully parser."
+          schema:
+            type: array
+            items:
+              $ref: "#/definitions/DnaMatch"
+        401:
+          description: "Unauthorized: Missing authorization header."
+        422:
+          description: "Unprocessable Entity: Invalid or bad parameter provided."
 
 
 ##############################################################################
@@ -8723,6 +8772,20 @@ definitions:
           type: string
         example:
           - "Gainesville, FA"
+      alternate_place_names:
+        description: "Alternative names of the place with date."
+        type: array
+        items:
+          type: object
+          properties:
+            date_str:
+              description: "Date the place name was in use."
+              type: string
+              example: "1800 to 1950"
+            value:
+              description: "The name in use."
+              type: string
+              example: "Gainesville, FA"
       gramps_id:
         description: "The place's Gramps ID."
         type: string
@@ -9789,7 +9852,7 @@ definitions:
         type: string
         example: "All private males."
       function:
-        description: "Logical operation to use in evaluating multiple rules. Must be 'and', 'or', 'xor' or 'one'"
+        description: "Logical operation to use in evaluating multiple rules. Must be 'and', 'or' or 'one'"
         type: string
         example: "and"
       invert:
@@ -9930,7 +9993,7 @@ definitions:
           type:
             description: "The database type."
             type: string
-            example: "SQLite"
+            example: "sqlite"
           version:
             description: "The database version."
             type: string
@@ -10743,6 +10806,22 @@ definitions:
         type: array
         items:
           $ref: "#/definitions/DnaSegment"
+      person_ref_idx:
+        description: The index of the associated person in the original person's person reference list
+        type: integer
+        example: 0
+      note_handles:
+        description: The handles of notes associated with the segments of the match
+        type: array
+        items:
+          type: string
+          example: 9BXKQC1PVLPYFMD6IX
+      raw_data:
+        description: The raw note strings
+        type: array
+        items:
+          type: string
+          example: "1,1,1,1"
 
 
 ##############################################################################
