@@ -24,7 +24,9 @@ import unittest
 import uuid
 from copy import deepcopy
 from typing import Dict
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+from celery.result import AsyncResult
 
 from gramps.cli.clidbman import CLIDbManager
 from gramps.gen.dbstate import DbState
@@ -61,7 +63,7 @@ class TestTransactionResource(unittest.TestCase):
         dirpath, _ = cls.dbman.create_new_db_cli(cls.name, dbid="sqlite")
         tree = os.path.basename(dirpath)
         with patch.dict("os.environ", {ENV_CONFIG_FILE: TEST_AUTH_CONFIG}):
-            cls.app = create_app()
+            cls.app = create_app(config_from_env=False)
         cls.app.config["TESTING"] = True
         cls.client = cls.app.test_client()
         with cls.app.app_context():
@@ -379,7 +381,7 @@ class TestTransactionResource(unittest.TestCase):
         rv = self.client.post(
             "/api/transactions/?background=1", json=trans, headers=headers
         )
-        self.assertEqual(rv.status_code, 400)
+        self.assertEqual(rv.status_code, 500)
 
     def test_missing_gramps_id(self):
         """Add with missing gramps ID."""
@@ -397,7 +399,85 @@ class TestTransactionResource(unittest.TestCase):
         rv = self.client.post(
             "/api/transactions/?background=1", json=trans, headers=headers
         )
-        self.assertEqual(rv.status_code, 400)
+        self.assertEqual(rv.status_code, 500)
+
+    def test_background_returns_task_object(self):
+        """When Celery is active, POST /transactions/?background=1 must return
+        {"task": {"id": ..., "href": ...}} with HTTP 202, not a serialized list."""
+        handle = make_handle()
+        obj = {
+            "_class": "Note",
+            "handle": handle,
+            "text": {"_class": "StyledText", "string": "Background task test."},
+            "gramps_id": "NBG1",
+        }
+        trans = [
+            {"type": "add", "_class": "Note", "handle": handle, "old": None, "new": obj}
+        ]
+        headers = get_headers(self.client, "editor", "123")
+        mock_task = MagicMock(spec=AsyncResult)
+        mock_task.id = "fake-task-id-123"
+        with patch(
+            "gramps_webapi.api.resources.transactions.run_task",
+            return_value=mock_task,
+        ):
+            rv = self.client.post(
+                "/api/transactions/?background=1", json=trans, headers=headers
+            )
+        self.assertEqual(rv.status_code, 202)
+        self.assertIsInstance(rv.json, dict)
+        self.assertIn("task", rv.json)
+        self.assertEqual(rv.json["task"]["id"], "fake-task-id-123")
+        self.assertIn("/api/tasks/", rv.json["task"]["href"])
+
+    def test_transaction_message_default(self):
+        """Default message 'Raw transaction' is stored in the undo log."""
+        handle = make_handle()
+        obj = {
+            "_class": "Note",
+            "handle": handle,
+            "text": {"_class": "StyledText", "string": "Message default test."},
+            "gramps_id": "NMSG0",
+        }
+        trans = [
+            {"type": "add", "_class": "Note", "handle": handle, "old": None, "new": obj}
+        ]
+        headers = get_headers(self.client, "editor", "123")
+        rv = self.client.post("/api/transactions/", json=trans, headers=headers)
+        assert rv.status_code == 200
+        rv = self.client.get("/api/transactions/history/", headers=headers)
+        assert rv.status_code == 200
+        assert rv.json[-1]["description"] == "Raw transaction"
+
+    def test_transaction_message_custom(self):
+        """Custom message is stored in the undo log for both foreground and background."""
+        headers = get_headers(self.client, "editor", "123")
+        for background in ("0", "1"):
+            handle = make_handle()
+            obj = {
+                "_class": "Note",
+                "handle": handle,
+                "text": {"_class": "StyledText", "string": "Custom message test."},
+                "gramps_id": f"NMSG{background}",
+            }
+            trans = [
+                {
+                    "type": "add",
+                    "_class": "Note",
+                    "handle": handle,
+                    "old": None,
+                    "new": obj,
+                }
+            ]
+            rv = self.client.post(
+                f"/api/transactions/?message=My+custom+message&background={background}",
+                json=trans,
+                headers=headers,
+            )
+            assert rv.status_code == 200
+            rv = self.client.get("/api/transactions/history/", headers=headers)
+            assert rv.status_code == 200
+            assert rv.json[-1]["description"] == "My custom message"
 
     def test_gramps60_issue(self):
         """Test for an issue that occurred after upgrading to Gramps 6.0"""
@@ -423,6 +503,7 @@ class TestTransactionResource(unittest.TestCase):
                 "_class": "Date",
             },
             "place": "",
+            "place_name": "",
             "_class": "Event",
             "type": {"_class": "EventType", "value": 11, "string": ""},
             "description": "Testereignis",

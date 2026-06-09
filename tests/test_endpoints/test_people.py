@@ -26,7 +26,7 @@ from urllib.parse import quote
 from . import BASE_URL, get_object_count, get_test_client
 from .checks import (
     check_boolean_parameter,
-    check_conforms_to_schema,
+    check_conforms_to_openapi_schema,
     check_invalid_semantics,
     check_invalid_syntax,
     check_keys_parameter,
@@ -59,7 +59,7 @@ class TestPeople(unittest.TestCase):
 
     def test_get_people_conforms_to_schema(self):
         """Test conforms to schema."""
-        check_conforms_to_schema(
+        check_conforms_to_openapi_schema(
             self, TEST_URL + "?extend=all&profile=all&backlinks=1", "Person"
         )
 
@@ -96,6 +96,31 @@ class TestPeople(unittest.TestCase):
         rv = check_success(self, TEST_URL + "?gramps_id=I0044")
         self.assertEqual(len(rv), 1)
         self.assertEqual(rv[0]["handle"], "GNUJQCL9MD64AM56OH")
+
+    def test_get_people_parameter_handles_expected_result(self):
+        """Test handles parameter returns only the requested objects."""
+        rv = check_success(self, TEST_URL + "?handles=GNUJQCL9MD64AM56OH,NRLKQCM1UUI9O8AMGQ")
+        self.assertEqual(len(rv), 2)
+        returned_handles = {obj["handle"] for obj in rv}
+        self.assertIn("GNUJQCL9MD64AM56OH", returned_handles)
+        self.assertIn("NRLKQCM1UUI9O8AMGQ", returned_handles)
+
+    def test_get_people_parameter_handles_single(self):
+        """Test handles parameter with a single handle."""
+        rv = check_success(self, TEST_URL + "?handles=GNUJQCL9MD64AM56OH")
+        self.assertEqual(len(rv), 1)
+        self.assertEqual(rv[0]["handle"], "GNUJQCL9MD64AM56OH")
+
+    def test_get_people_parameter_handles_missing_skipped(self):
+        """Test that non-existing handles are silently skipped."""
+        rv = check_success(self, TEST_URL + "?handles=GNUJQCL9MD64AM56OH,doesnotexist")
+        self.assertEqual(len(rv), 1)
+        self.assertEqual(rv[0]["handle"], "GNUJQCL9MD64AM56OH")
+
+    def test_get_people_parameter_handles_all_missing(self):
+        """Test that all-missing handles returns an empty list."""
+        rv = check_success(self, TEST_URL + "?handles=doesnotexist1,doesnotexist2")
+        self.assertEqual(rv, [])
 
     def test_get_people_parameter_strip_validate_semantics(self):
         """Test invalid strip parameter and values."""
@@ -563,6 +588,7 @@ class TestPeople(unittest.TestCase):
                     "confidence": 0,
                     "date": "after 1717",
                     "place": "Hickory-Morganton-Lenoir, NC, USA",
+                    "place_name": "Hickory-Morganton-Lenoir",
                     "summary": "Birth - Aguilar, Eleanor",
                     "type": "Birth",
                 },
@@ -572,6 +598,7 @@ class TestPeople(unittest.TestCase):
                     "confidence": 0,
                     "date": "after 1760-02",
                     "place": "Plattsburgh, Clinton, NY, USA",
+                    "place_name": "Plattsburgh",
                     "summary": "Death - Aguilar, Eleanor",
                     "type": "Death",
                 },
@@ -582,6 +609,7 @@ class TestPeople(unittest.TestCase):
                         "confidence": 0,
                         "date": "after 1717",
                         "place": "Hickory-Morganton-Lenoir, NC, USA",
+                        "place_name": "Hickory-Morganton-Lenoir",
                         "role": "Primary",
                         "summary": "Birth - Aguilar, Eleanor",
                         "type": "Birth",
@@ -592,6 +620,7 @@ class TestPeople(unittest.TestCase):
                         "confidence": 0,
                         "date": "after 1760-02",
                         "place": "Plattsburgh, Clinton, NY, USA",
+                        "place_name": "Plattsburgh",
                         "role": "Primary",
                         "summary": "Death - Aguilar, Eleanor",
                         "type": "Death",
@@ -607,6 +636,7 @@ class TestPeople(unittest.TestCase):
                                     "confidence": 0,
                                     "date": "between 1746 and 1755",
                                     "place": "Plattsburgh, Clinton, NY, USA",
+                                    "place_name": "Plattsburgh",
                                     "summary": "Birth - Adams, Jane",
                                     "type": "Birth",
                                 },
@@ -616,11 +646,13 @@ class TestPeople(unittest.TestCase):
                                     "confidence": 0,
                                     "date": "estimated from 1800 to 1805",
                                     "place": "Jefferson City, MO, USA",
+                                    "place_name": "Jefferson City",
                                     "summary": "Death - Adams, Jane",
                                     "type": "Death",
                                 },
                                 "gramps_id": "I0554",
                                 "handle": "914KQCNJ9TMDQMDL81",
+                                "name_display": "Adams, Jane",
                                 "name_given": "Jane",
                                 "name_surname": "Adams",
                                 "sex": "F",
@@ -631,6 +663,7 @@ class TestPeople(unittest.TestCase):
                                 "citations": 0,
                                 "confidence": 0,
                                 "place": "Loveland, Larimer, CO, USA",
+                                "place_name": "Loveland",
                                 "span": "unknown",
                                 "summary": "Marriage - Adams, William and Aguilar, Eleanor",
                                 "type": "Marriage",
@@ -644,6 +677,7 @@ class TestPeople(unittest.TestCase):
                                 "confidence": 0,
                                 "date": "about 1700-10-26",
                                 "place": "Dyersburg, TN, USA",
+                                "place_name": "Dyersburg",
                                 "summary": "Birth - Adams, William",
                                 "type": "Birth",
                             },
@@ -653,11 +687,13 @@ class TestPeople(unittest.TestCase):
                                 "confidence": 0,
                                 "date": "1787-03-10",
                                 "place": "Hattiesburg, MS, USA",
+                                "place_name": "Hattiesburg",
                                 "summary": "Death - Adams, William",
                                 "type": "Death",
                             },
                             "gramps_id": "I0701",
                             "handle": "FR6KQCRONQWR69LFUI",
+                            "name_display": "Adams, William",
                             "name_given": "William",
                             "name_surname": "Adams",
                             "sex": "M",
@@ -668,6 +704,7 @@ class TestPeople(unittest.TestCase):
                             "citations": 0,
                             "confidence": 0,
                             "place": "Loveland, Larimer, CO, USA",
+                            "place_name": "Loveland",
                             "span": "0 days",
                             "summary": "Marriage - Adams, William and Aguilar, Eleanor",
                             "type": "Marriage",
@@ -679,6 +716,7 @@ class TestPeople(unittest.TestCase):
                                 "confidence": 0,
                                 "date": "after 1717",
                                 "place": "Hickory-Morganton-Lenoir, NC, USA",
+                                "place_name": "Hickory-Morganton-Lenoir",
                                 "summary": "Birth - Aguilar, Eleanor",
                                 "type": "Birth",
                             },
@@ -688,11 +726,13 @@ class TestPeople(unittest.TestCase):
                                 "confidence": 0,
                                 "date": "after 1760-02",
                                 "place": "Plattsburgh, Clinton, NY, USA",
+                                "place_name": "Plattsburgh",
                                 "summary": "Death - Aguilar, Eleanor",
                                 "type": "Death",
                             },
                             "gramps_id": "I0702",
                             "handle": "OS6KQCDBW36VIRF98Z",
+                            "name_display": "Aguilar, Eleanor",
                             "name_given": "Eleanor",
                             "name_surname": "Aguilar",
                             "sex": "F",
@@ -702,6 +742,7 @@ class TestPeople(unittest.TestCase):
                 ],
                 "gramps_id": "I0702",
                 "handle": "OS6KQCDBW36VIRF98Z",
+                "name_display": "Aguilar, Eleanor",
                 "name_given": "Eleanor",
                 "name_surname": "Aguilar",
                 "primary_parent_family": {
@@ -713,6 +754,7 @@ class TestPeople(unittest.TestCase):
                                 "confidence": 0,
                                 "date": "after 1717",
                                 "place": "Hickory-Morganton-Lenoir, NC, USA",
+                                "place_name": "Hickory-Morganton-Lenoir",
                                 "summary": "Birth - Aguilar, Eleanor",
                                 "type": "Birth",
                             },
@@ -722,11 +764,13 @@ class TestPeople(unittest.TestCase):
                                 "confidence": 0,
                                 "date": "after 1760-02",
                                 "place": "Plattsburgh, Clinton, NY, USA",
+                                "place_name": "Plattsburgh",
                                 "summary": "Death - Aguilar, Eleanor",
                                 "type": "Death",
                             },
                             "gramps_id": "I0702",
                             "handle": "OS6KQCDBW36VIRF98Z",
+                            "name_display": "Aguilar, Eleanor",
                             "name_given": "Eleanor",
                             "name_surname": "Aguilar",
                             "sex": "F",
@@ -740,6 +784,7 @@ class TestPeople(unittest.TestCase):
                             "confidence": 0,
                             "date": "before 1665",
                             "place": "Ketchikan, AK, USA",
+                            "place_name": "Ketchikan",
                             "summary": "Birth - Aguilar, John",
                             "type": "Birth",
                         },
@@ -749,11 +794,13 @@ class TestPeople(unittest.TestCase):
                             "confidence": 0,
                             "date": "before 1745-02",
                             "place": "Wooster, OH, USA",
+                            "place_name": "Wooster",
                             "summary": "Death - Aguilar, John",
                             "type": "Death",
                         },
                         "gramps_id": "I0953",
                         "handle": "4GCKQC20GMQLO6N77C",
+                        "name_display": "Aguilar, John",
                         "name_given": "John",
                         "name_surname": "Aguilar",
                         "sex": "M",
@@ -770,17 +817,20 @@ class TestPeople(unittest.TestCase):
                                     "birth": {
                                         "date": "after 1717",
                                         "place": "Hickory-Morganton-Lenoir, NC, USA",
+                                        "place_name": "Hickory-Morganton-Lenoir",
                                         "summary": "Birth - Aguilar, Eleanor",
                                         "type": "Birth",
                                     },
                                     "death": {
                                         "date": "after 1760-02",
                                         "place": "Plattsburgh, Clinton, NY, USA",
+                                        "place_name": "Plattsburgh",
                                         "summary": "Death - Aguilar, Eleanor",
                                         "type": "Death",
                                     },
                                     "gramps_id": "I0702",
                                     "handle": "OS6KQCDBW36VIRF98Z",
+                                    "name_display": "Aguilar, Eleanor",
                                     "name_given": "Eleanor",
                                     "name_surname": "Aguilar",
                                     "sex": "F",
@@ -791,17 +841,20 @@ class TestPeople(unittest.TestCase):
                                 "birth": {
                                     "date": "before 1665",
                                     "place": "Ketchikan, AK, USA",
+                                    "place_name": "Ketchikan",
                                     "summary": "Birth - Aguilar, John",
                                     "type": "Birth",
                                 },
                                 "death": {
                                     "date": "before 1745-02",
                                     "place": "Wooster, OH, USA",
+                                    "place_name": "Wooster",
                                     "summary": "Death - Aguilar, John",
                                     "type": "Death",
                                 },
                                 "gramps_id": "I0953",
                                 "handle": "4GCKQC20GMQLO6N77C",
+                                "name_display": "Aguilar, John",
                                 "name_given": "John",
                                 "name_surname": "Aguilar",
                                 "sex": "M",
@@ -816,17 +869,20 @@ class TestPeople(unittest.TestCase):
                                     "birth": {
                                         "date": "between 1746 and 1755",
                                         "place": "Plattsburgh, Clinton, NY, USA",
+                                        "place_name": "Plattsburgh",
                                         "summary": "Birth - Adams, Jane",
                                         "type": "Birth",
                                     },
                                     "death": {
                                         "date": "estimated from 1800 to 1805",
                                         "place": "Jefferson City, MO, USA",
+                                        "place_name": "Jefferson City",
                                         "summary": "Death - Adams, Jane",
                                         "type": "Death",
                                     },
                                     "gramps_id": "I0554",
                                     "handle": "914KQCNJ9TMDQMDL81",
+                                    "name_display": "Adams, Jane",
                                     "name_given": "Jane",
                                     "name_surname": "Adams",
                                     "sex": "F",
@@ -837,17 +893,20 @@ class TestPeople(unittest.TestCase):
                                 "birth": {
                                     "date": "about 1700-10-26",
                                     "place": "Dyersburg, TN, USA",
+                                    "place_name": "Dyersburg",
                                     "summary": "Birth - Adams, William",
                                     "type": "Birth",
                                 },
                                 "death": {
                                     "date": "1787-03-10",
                                     "place": "Hattiesburg, MS, USA",
+                                    "place_name": "Hattiesburg",
                                     "summary": "Death - Adams, William",
                                     "type": "Death",
                                 },
                                 "gramps_id": "I0701",
                                 "handle": "FR6KQCRONQWR69LFUI",
+                                "name_display": "Adams, William",
                                 "name_given": "William",
                                 "name_surname": "Adams",
                                 "sex": "M",
@@ -856,6 +915,7 @@ class TestPeople(unittest.TestCase):
                             "handle": "R14KQCXMSQYXI2CS6W",
                             "marriage": {
                                 "place": "Loveland, Larimer, CO, USA",
+                                "place_name": "Loveland",
                                 "summary": "Marriage - Adams, William and Aguilar, Eleanor",
                                 "type": "Marriage",
                             },
@@ -863,17 +923,20 @@ class TestPeople(unittest.TestCase):
                                 "birth": {
                                     "date": "after 1717",
                                     "place": "Hickory-Morganton-Lenoir, NC, USA",
+                                    "place_name": "Hickory-Morganton-Lenoir",
                                     "summary": "Birth - Aguilar, Eleanor",
                                     "type": "Birth",
                                 },
                                 "death": {
                                     "date": "after 1760-02",
                                     "place": "Plattsburgh, Clinton, NY, USA",
+                                    "place_name": "Plattsburgh",
                                     "summary": "Death - Aguilar, Eleanor",
                                     "type": "Death",
                                 },
                                 "gramps_id": "I0702",
                                 "handle": "OS6KQCDBW36VIRF98Z",
+                                "name_display": "Aguilar, Eleanor",
                                 "name_given": "Eleanor",
                                 "name_surname": "Aguilar",
                                 "sex": "F",
@@ -919,7 +982,7 @@ class TestPeopleHandle(unittest.TestCase):
 
     def test_get_people_handle_conforms_to_schema(self):
         """Test conforms to schema."""
-        check_conforms_to_schema(
+        check_conforms_to_openapi_schema(
             self,
             TEST_URL + "0PWJQCZYFXOS0HGREE?extend=all&profile=all&backlinks=1",
             "Person",
@@ -948,7 +1011,7 @@ class TestPeopleHandle(unittest.TestCase):
 
     def test_get_people_handle_parameter_strip_expected_result(self):
         """Test strip parameter produces expected result."""
-        check_strip_parameter(self, TEST_URL + "1QTJQCP5QMT2X7YJDK")
+        check_strip_parameter(self, TEST_URL + "1QTJQCP5QMT2X7YJDK", paginate=False)
 
     def test_get_people_handle_parameter_keys_validate_semantics(self):
         """Test invalid keys parameter and values."""
@@ -1130,17 +1193,20 @@ class TestPeopleHandle(unittest.TestCase):
                 "birth": {
                     "date": "1906-09-05",
                     "place": "Central City, Muhlenberg, KY, USA",
+                    "place_name": "Central City",
                     "type": "Birth",
                     "summary": "Birth - Warner, Mary Grace Elizabeth",
                 },
                 "death": {
                     "date": "1993-06-06",
                     "place": "Sevierville, TN, USA",
+                    "place_name": "Sevierville",
                     "type": "Death",
                     "summary": "Death - Warner, Mary Grace Elizabeth",
                 },
                 "gramps_id": "I0138",
                 "handle": "0PWJQCZYFXOS0HGREE",
+                "name_display": "Warner, Mary Grace Elizabeth",
                 "name_given": "Mary Grace Elizabeth",
                 "name_suffix": "",
                 "name_surname": "Warner",
@@ -1200,6 +1266,7 @@ class TestPeopleHandle(unittest.TestCase):
             "events",
             "families",
             "handle",
+            "name_display",
             "name_given",
             "name_surname",
             "other_parent_families",
@@ -1217,6 +1284,37 @@ class TestPeopleHandle(unittest.TestCase):
             rv["profile"]["primary_parent_family"]["relationship"], "Verheiratet"
         )
         self.assertEqual(rv["profile"]["events"][2]["type"], "Beerdigung")
+
+    def test_get_people_handle_parameter_precision_validate_semantics(self):
+        """Test invalid precision parameter and values."""
+        check_invalid_semantics(
+            self, TEST_URL + "FR6KQCRONQWR69LFUI?profile=age&precision", check="number"
+        )
+
+    def test_get_people_handle_parameter_precision_expected_result(self):
+        """Test precision parameter controls granularity of age strings."""
+        # FR6KQCRONQWR69LFUI = William Adams (I0701), has birth and death events
+        rv3 = check_success(
+            self, TEST_URL + "FR6KQCRONQWR69LFUI?profile=age&precision=3"
+        )
+        rv2 = check_success(
+            self, TEST_URL + "FR6KQCRONQWR69LFUI?profile=age&precision=2"
+        )
+        rv1 = check_success(
+            self, TEST_URL + "FR6KQCRONQWR69LFUI?profile=age&precision=1"
+        )
+        age3 = rv3["profile"]["death"]["age"]
+        age2 = rv2["profile"]["death"]["age"]
+        age1 = rv1["profile"]["death"]["age"]
+        # precision=3 includes years, months, and days
+        self.assertRegex(age3, r"years.*months.*days")
+        # precision=2 includes years and months but not days
+        self.assertRegex(age2, r"years.*months")
+        self.assertNotRegex(age2, r"days")
+        # precision=1 includes years only
+        self.assertRegex(age1, r"years")
+        self.assertNotRegex(age1, r"months")
+        self.assertNotRegex(age1, r"days")
 
     def test_get_people_handle_parameter_backlinks_validate_semantics(self):
         """Test invalid backlinks parameter and values."""
@@ -1243,6 +1341,17 @@ class TestPeopleHandle(unittest.TestCase):
         self.assertEqual(backlinks["family"][0]["handle"], "LOTJQC78O5B4WQGJRP")
         self.assertEqual(backlinks["family"][1]["handle"], "UPTJQC4VPCABZUDB75")
 
+    def test_get_people_handle_parameter_name_format_expected_result_name_display(self):
+        """Test the people handle endpoint with profile and name_format parameters"""
+        rv = check_success(
+            self,
+            TEST_URL
+            + "0PWJQCZYFXOS0HGREE?profile=all&name_format=%25f%20%28%25x%29%20%25M",
+        )
+        self.assertEqual(
+            rv["profile"]["name_display"], "Mary Grace Elizabeth (Mary) WARNER"
+        )
+
 
 class TestPeopleHandleTimeline(unittest.TestCase):
     """Test cases for the /api/people/{handle}/timeline endpoint for a specific person."""
@@ -1258,7 +1367,7 @@ class TestPeopleHandleTimeline(unittest.TestCase):
 
     def test_get_people_handle_timeline_conforms_to_schema(self):
         """Test conforms to schema."""
-        check_conforms_to_schema(
+        check_conforms_to_openapi_schema(
             self,
             TEST_URL + "GNUJQCL9MD64AM56OH/timeline?ratings=1",
             "TimelineEventProfile",

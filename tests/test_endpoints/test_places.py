@@ -24,7 +24,7 @@ import unittest
 from . import BASE_URL, get_object_count, get_test_client
 from .checks import (
     check_boolean_parameter,
-    check_conforms_to_schema,
+    check_conforms_to_openapi_schema,
     check_invalid_semantics,
     check_invalid_syntax,
     check_keys_parameter,
@@ -56,7 +56,7 @@ class TestPlaces(unittest.TestCase):
 
     def test_get_places_conforms_to_schema(self):
         """Test conforms to schema."""
-        check_conforms_to_schema(
+        check_conforms_to_openapi_schema(
             self, TEST_URL + "?extend=all&profile=all&backlinks=1", "Place"
         )
 
@@ -335,11 +335,22 @@ class TestPlaces(unittest.TestCase):
             self, TEST_URL + "?gramps_id=P1108", "tag_list", "tags", join="&"
         )
 
+    def test_get_places_parameter_extend_expected_result_placeref_list(self):
+        """Test extend placeref_list result."""
+        check_single_extend_parameter(
+            self,
+            TEST_URL + "?gramps_id=P1108",
+            "placeref_list",
+            "places",
+            join="&",
+            reference=True,
+        )
+
     def test_get_places_parameter_extend_expected_result_all(self):
         """Test extend all result."""
         rv = check_success(self, TEST_URL + "?gramps_id=P1108&extend=all&keys=extended")
-        self.assertEqual(len(rv[0]["extended"]), 4)
-        for key in ["citations", "media", "notes", "tags"]:
+        self.assertEqual(len(rv[0]["extended"]), 5)
+        for key in ["citations", "media", "notes", "places", "tags"]:
             self.assertIn(key, rv[0]["extended"])
 
     def test_get_places_parameter_extend_expected_result_multiple_keys(self):
@@ -365,6 +376,17 @@ class TestPlaces(unittest.TestCase):
         for key in ["a5af0ec23c136ad6742", "a5af0ec27662bcd851c"]:
             self.assertIn(key, rv[0]["backlinks"]["event"])
 
+    def test_get_places_parameter_place_hierarchy_false(self):
+        """Test place_hierarchy=0 omits parent_places from profile."""
+        rv = check_success(
+            self, TEST_URL + "?gramps_id=P0860&profile=self&place_hierarchy=0"
+        )
+        self.assertNotIn("parent_places", rv[0]["profile"])
+        self.assertNotIn("direct_parent_places", rv[0]["profile"])
+        # Basic profile fields are still present
+        self.assertIn("name", rv[0]["profile"])
+        self.assertIn("gramps_id", rv[0]["profile"])
+
 
 class TestPlacesHandle(unittest.TestCase):
     """Test cases for the /api/places/{handle} endpoint for a specific place."""
@@ -380,7 +402,7 @@ class TestPlacesHandle(unittest.TestCase):
 
     def test_get_places_handle_conforms_to_schema(self):
         """Test conforms to schema."""
-        check_conforms_to_schema(
+        check_conforms_to_openapi_schema(
             self,
             TEST_URL + "09UJQCF3TNGH9GU0P1?extend=all&profile=all&backlinks=1",
             "Place",
@@ -405,7 +427,7 @@ class TestPlacesHandle(unittest.TestCase):
 
     def test_get_places_handle_parameter_strip_expected_result(self):
         """Test strip parameter produces expected result."""
-        check_strip_parameter(self, TEST_URL + "YNUJQC8YM5EGRG868J")
+        check_strip_parameter(self, TEST_URL + "YNUJQC8YM5EGRG868J", paginate=False)
 
     def test_get_places_handle_parameter_keys_validate_semantics(self):
         """Test invalid keys parameter and values."""
@@ -477,13 +499,23 @@ class TestPlacesHandle(unittest.TestCase):
             self, TEST_URL + "YNUJQC8YM5EGRG868J", "tag_list", "tags"
         )
 
+    def test_get_places_handle_parameter_extend_expected_result_placeref_list(self):
+        """Test extend placeref_list result."""
+        check_single_extend_parameter(
+            self,
+            TEST_URL + "YNUJQC8YM5EGRG868J",
+            "placeref_list",
+            "places",
+            reference=True,
+        )
+
     def test_get_places_handle_parameter_extend_expected_result_all(self):
         """Test extend all result."""
         rv = check_success(
             self, TEST_URL + "YNUJQC8YM5EGRG868J?extend=all&keys=extended"
         )
-        self.assertEqual(len(rv["extended"]), 4)
-        for key in ["citations", "media", "notes", "tags"]:
+        self.assertEqual(len(rv["extended"]), 5)
+        for key in ["citations", "media", "notes", "places", "tags"]:
             self.assertIn(key, rv["extended"])
 
     def test_get_places_handle_parameter_extend_expected_result_multiple_keys(self):
@@ -538,6 +570,20 @@ class TestPlacesHandle(unittest.TestCase):
                         "type": "Nazione",
                     },
                 ],
+                "direct_parent_places": [
+                    {
+                        "place": {
+                            "alternate_names": [],
+                            "alternate_place_names": [],
+                            "gramps_id": "P0194",
+                            "lat": 0,
+                            "long": 0,
+                            "name": "Llano",
+                            "type": "Contea",
+                        },
+                        "date_str": "",
+                    },
+                ],
                 "type": "Città",
             },
         )
@@ -574,10 +620,33 @@ class TestPlacesHandle(unittest.TestCase):
                         "type": "Country",
                     },
                 ],
+                "direct_parent_places": [
+                    {
+                        "place": {
+                            "alternate_names": [],
+                            "alternate_place_names": [],
+                            "gramps_id": "P0442",
+                            "lat": 0,
+                            "long": 0,
+                            "name": "Russia",
+                            "type": "Country",
+                        },
+                        "date_str": "",
+                    }
+                ],
                 "references": {},
                 "type": "City",
             },
         )
+
+    def test_get_places_handle_parameter_place_hierarchy_false(self):
+        """Test place_hierarchy=0 omits parent_places from profile."""
+        rv = check_success(
+            self, TEST_URL + "08TJQCCFIX31BXPNXN?profile=self&place_hierarchy=0"
+        )
+        self.assertNotIn("parent_places", rv["profile"])
+        self.assertNotIn("direct_parent_places", rv["profile"])
+        self.assertEqual(rv["profile"]["gramps_id"], "P0860")
 
     def test_get_places_handle_parameter_backlinks_validate_semantics(self):
         """Test invalid backlinks parameter and values."""

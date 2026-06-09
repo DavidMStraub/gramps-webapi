@@ -2,6 +2,7 @@
 # Gramps Web API - A RESTful API for the Gramps genealogy program
 #
 # Copyright (C) 2020-2022      David Straub
+# Copyright (C) 2025           Alexander Bocken
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -21,13 +22,16 @@
 
 import secrets
 import uuid
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Set, Union
 
 import sqlalchemy as sa
+from flask import current_app
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.exc import IntegrityError, StatementError
 from sqlalchemy.orm import mapped_column
 from sqlalchemy.sql.functions import coalesce
+
 
 from ..const import DB_CONFIG_ALLOWED_KEYS
 from .const import PERMISSIONS, PERM_USE_CHAT, ROLE_ADMIN, ROLE_OWNER
@@ -35,6 +39,7 @@ from .passwords import hash_password, verify_password
 from .sql_guid import GUID
 
 user_db = SQLAlchemy()
+
 
 def add_user(
     name: str,
@@ -136,11 +141,18 @@ def get_tree(guid: str) -> Optional[str]:
 
 
 def delete_user(name: str) -> None:
-    """Delete an existing user."""
+    """Delete an existing user and their associated OIDC accounts."""
     query = user_db.session.query(User)  # pylint: disable=no-member
     user = query.filter_by(name=name).scalar()
     if user is None:
         raise ValueError(f"User {name} not found")
+
+    # Manually delete associated OIDC accounts first.
+    # This is needed because SQLite does not enforce foreign key constraints by default.
+    user_db.session.query(OIDCAccount).filter_by(
+        user_id=user.id
+    ).delete()  # pylint: disable=no-member
+
     user_db.session.delete(user)  # pylint: disable=no-member
     user_db.session.commit()  # pylint: disable=no-member
 
@@ -169,7 +181,25 @@ def modify_user(
         user.role = role
     if tree is not None:
         user.tree = tree
-    user_db.session.commit()  # pylint: disable=no-member
+    try:
+        user_db.session.commit()  # pylint: disable=no-member
+    except IntegrityError as exc:
+        user_db.session.rollback()  # pylint: disable=no-member
+        reason = str(exc.orig.args) if exc.orig else ""
+        # Check for unique constraint violations on username or email
+        # PostgreSQL: "users_name_key" or "users_email_key"
+        # SQLite: "users.name" or "users.email"
+        if "users_name_key" in reason or "users.name" in reason:
+            message = "User already exists"
+            raise ValueError(message) from exc
+        elif "users_email_key" in reason or "users.email" in reason:
+            message = "E-mail already exists"
+            raise ValueError(message) from exc
+        else:
+            # Let unexpected database errors bubble up as IntegrityError
+            # This will result in a 500 error, which is appropriate for
+            # unexpected database issues
+            raise
 
 
 def authorized(username: str, password: str) -> bool:
@@ -191,7 +221,9 @@ def get_pwhash(username: str) -> str:
     return user.pwhash
 
 
-def _get_user_detail(user, include_guid: bool = False):
+def _get_user_detail(
+    user, include_guid: bool = False, include_oidc_accounts: bool = False
+):
     details = {
         "name": user.name,
         "email": user.email,
@@ -201,6 +233,15 @@ def _get_user_detail(user, include_guid: bool = False):
     }
     if include_guid:
         details["user_id"] = user.id
+    if include_oidc_accounts:
+        oidc_accounts = get_user_oidc_accounts(user.id)
+        details["oidc_accounts"] = oidc_accounts
+        # Add a simplified account source summary for frontend display
+        if oidc_accounts:
+            oidc_name = current_app.config.get("OIDC_NAME") or "Custom OIDC"
+            details["account_source"] = oidc_name
+        else:
+            details["account_source"] = "Local"
     return details
 
 
@@ -214,7 +255,10 @@ def get_user_details(username: str) -> Optional[Dict[str, Any]]:
 
 
 def get_all_user_details(
-    tree: Optional[str], include_treeless=False, include_guid: bool = False
+    tree: Optional[str],
+    include_treeless=False,
+    include_guid: bool = False,
+    include_oidc_accounts: bool = False,
 ) -> List[Dict[str, Any]]:
     """Return details about all users.
 
@@ -222,6 +266,7 @@ def get_all_user_details(
     If tree is not None, only return users of given tree.
 
     If include_treeless is True, include also users with empty tree ID.
+    If include_oidc_accounts is True, include OIDC provider information.
     """
     query = user_db.session.query(User)  # pylint: disable=no-member
     if tree:
@@ -230,7 +275,12 @@ def get_all_user_details(
         else:
             query = query.filter(User.tree == tree)
     users = query.all()
-    return [_get_user_detail(user, include_guid=include_guid) for user in users]
+    return [
+        _get_user_detail(
+            user, include_guid=include_guid, include_oidc_accounts=include_oidc_accounts
+        )
+        for user in users
+    ]
 
 
 def get_permissions(username: str, tree: str) -> Set[str]:
@@ -247,17 +297,20 @@ def get_permissions(username: str, tree: str) -> Set[str]:
     return permissions
 
 
-def get_owner_emails(tree: str, include_admins: bool = False) -> List[str]:
+def get_owner_emails(
+    tree: str, include_admins: bool = False, include_treeless: bool = False
+) -> List[str]:
     """Get e-mail addresses of all tree owners (and optionally include site admins)."""
     query = user_db.session.query(User)  # pylint: disable=no-member
-    if include_admins:
-        users = (
-            query.filter_by(tree=tree)
-            .filter(sa.or_(User.role == ROLE_OWNER, User.role == ROLE_ADMIN))
-            .all()
-        )
+    if include_treeless:
+        query = query.filter(sa.or_(User.tree == tree, User.tree.is_(None)))
     else:
-        users = query.filter_by(tree=tree, role=ROLE_OWNER).all()
+        query = query.filter(User.tree == tree)
+    if include_admins:
+        query = query.filter(sa.or_(User.role == ROLE_OWNER, User.role == ROLE_ADMIN))
+    else:
+        query = query.filter_by(role=ROLE_OWNER)
+    users = query.all()
     return [user.email for user in users if user.email]
 
 
@@ -416,6 +469,132 @@ def is_tree_disabled(tree: str) -> bool:
     return tree_obj.enabled == 0
 
 
+def get_tree_config(tree: str) -> dict:
+    """Get the tree config blob (returns empty dict if not set)."""
+    query = user_db.session.query(Tree)  # pylint: disable=no-member
+    tree_obj: Tree = query.filter_by(id=tree).scalar()
+    if tree_obj is None:
+        return {}
+    return tree_obj.config or {}
+
+
+def set_tree_config(tree: str, config: dict) -> None:
+    """Replace the tree config blob."""
+    query = user_db.session.query(Tree)  # pylint: disable=no-member
+    tree_obj = query.filter_by(id=tree).scalar()
+    if not tree_obj:
+        tree_obj = Tree(id=tree)
+    tree_obj.config = config
+    user_db.session.add(tree_obj)  # pylint: disable=no-member
+    user_db.session.commit()  # pylint: disable=no-member
+
+
+def create_oidc_account(
+    user_id: str, provider_id: str, subject_id: str, email: Optional[str] = None
+) -> None:
+    """Create a new OIDC account association."""
+    oidc_account = OIDCAccount(
+        user_id=user_id,
+        provider_id=provider_id,
+        subject_id=subject_id,
+        email=email,
+    )
+    user_db.session.add(oidc_account)  # pylint: disable=no-member
+    user_db.session.commit()  # pylint: disable=no-member
+
+
+def get_oidc_account(provider_id: str, subject_id: str) -> Optional[str]:
+    """Get user ID by OIDC provider_id and subject_id."""
+    query = user_db.session.query(OIDCAccount.user_id)  # pylint: disable=no-member
+    oidc_account = query.filter_by(
+        provider_id=provider_id, subject_id=subject_id
+    ).scalar()
+    return oidc_account
+
+
+def get_user_oidc_accounts(user_id: str) -> List[Dict[str, Any]]:
+    """Get all OIDC accounts associated with a user."""
+    query = user_db.session.query(OIDCAccount)  # pylint: disable=no-member
+    oidc_accounts = query.filter_by(user_id=user_id).all()
+    return [
+        {
+            "provider_id": account.provider_id,
+            "subject_id": account.subject_id,
+            "email": account.email,
+            "created_at": account.created_at,
+        }
+        for account in oidc_accounts
+    ]
+
+
+def link_oidc_account(
+    user_id: str, provider_id: str, subject_id: str, email: Optional[str] = None
+) -> None:
+    """Link an OIDC account to an existing user.
+
+    Args:
+        user_id: The user GUID to link the OIDC account to
+        provider_id: The OIDC provider identifier
+        subject_id: The subject ID from the OIDC provider
+        email: Optional email from the OIDC provider
+
+    Raises:
+        ValueError: If the provider_id/subject_id combination is already linked
+    """
+    # Check if this OIDC account is already linked to any user
+    existing_user = get_oidc_account(provider_id, subject_id)
+    if existing_user:
+        raise ValueError(
+            f"This {provider_id} account is already linked to another user"
+        )
+
+    create_oidc_account(user_id, provider_id, subject_id, email)
+
+
+def delete_oidc_account(user_id: str, provider_id: str) -> bool:
+    """Delete an OIDC account association.
+
+    Args:
+        user_id: The user GUID
+        provider_id: The OIDC provider identifier
+
+    Returns:
+        True if an account was deleted, False if no account was found
+    """
+    query = user_db.session.query(OIDCAccount)  # pylint: disable=no-member
+    oidc_account = query.filter_by(
+        user_id=user_id, provider_id=provider_id
+    ).first()
+
+    if oidc_account is None:
+        return False
+
+    user_db.session.delete(oidc_account)  # pylint: disable=no-member
+    user_db.session.commit()  # pylint: disable=no-member
+    return True
+
+
+def get_user_by_oidc(provider_id: str, subject_id: str) -> Optional[User]:
+    """Get the user associated with an OIDC account.
+
+    Args:
+        provider_id: The OIDC provider identifier
+        subject_id: The subject ID from the OIDC provider
+
+    Returns:
+        The User object if found, None otherwise
+    """
+    query = user_db.session.query(OIDCAccount)  # pylint: disable=no-member
+    oidc_account = query.filter_by(
+        provider_id=provider_id, subject_id=subject_id
+    ).first()
+
+    if oidc_account is None:
+        return None
+
+    return user_db.session.get(User, oidc_account.user_id)  # pylint: disable=no-member
+
+
 class User(user_db.Model):  # type: ignore
     """User table class for sqlalchemy."""
 
@@ -462,7 +641,53 @@ class Tree(user_db.Model):  # type: ignore
     usage_ai = mapped_column(sa.Integer)
     min_role_ai = mapped_column(sa.Integer)
     enabled = mapped_column(sa.Integer, default=1, server_default="1")
+    config = mapped_column(sa.JSON, nullable=True)
 
     def __repr__(self):
         """Return string representation of instance."""
         return f"<Tree(id='{self.id}')>"
+
+
+class OIDCAccount(user_db.Model):  # type: ignore
+    """OIDC account association table for secure provider_id and subject_id mapping."""
+
+    __tablename__ = "oidc_accounts"
+
+    id = mapped_column(sa.Integer, primary_key=True, autoincrement=True)
+    user_id = mapped_column(
+        GUID, sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    provider_id = mapped_column(sa.String(64), nullable=False)
+    subject_id = mapped_column(sa.String(255), nullable=False)
+    email = mapped_column(sa.String(255), nullable=True, index=True)
+    created_at = mapped_column(
+        sa.DateTime, nullable=False, server_default=sa.func.now()
+    )
+
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "provider_id", "subject_id", name="uq_oidc_provider_subject"
+        ),
+    )
+
+    def __repr__(self):
+        """Return string representation of instance."""
+        return f"<OIDCAccount(provider_id='{self.provider_id}', subject_id='{self.subject_id}', user_id='{self.user_id}')>"
+
+
+class TaskTree(user_db.Model):  # type: ignore
+    """Audit table linking Celery task IDs to the tree and user that triggered them."""
+
+    __tablename__ = "task_tree"
+
+    task_id = mapped_column(sa.String(155), primary_key=True)
+    tree = mapped_column(sa.String, index=True)
+    user_id = mapped_column(sa.String, index=True)
+    name = mapped_column(sa.String, nullable=False)
+    created_at = mapped_column(
+        sa.DateTime, nullable=False, server_default=sa.func.now()
+    )
+
+    def __repr__(self):
+        """Return string representation of instance."""
+        return f"<TaskTree(task_id='{self.task_id}', tree='{self.tree}', name='{self.name}')>"

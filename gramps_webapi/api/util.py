@@ -21,7 +21,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import logging
@@ -29,7 +28,7 @@ import os
 import smtplib
 import socket
 from email.message import EmailMessage
-from email.utils import make_msgid
+from email.utils import formatdate, make_msgid
 from http import HTTPStatus
 from typing import Any, BinaryIO, NoReturn, Sequence
 
@@ -46,6 +45,7 @@ from flask import (
     request,
 )
 from flask_jwt_extended import get_jwt, get_jwt_identity
+from flask_jwt_extended.exceptions import WrongTokenError
 from gramps.cli.clidbman import NAME_FILE, CLIDbManager
 from gramps.gen.config import config
 from gramps.gen.const import GRAMPS_LOCALE
@@ -68,7 +68,16 @@ from gramps.gen.dbstate import DbState
 from gramps.gen.errors import HandleError
 from gramps.gen.lib.json_utils import data_to_object, object_to_dict
 from gramps.gen.proxy import PrivateProxyDb
-from gramps.gen.proxy.private import sanitize_media
+from gramps.gen.proxy.private import (
+    sanitize_citation,
+    sanitize_event,
+    sanitize_family,
+    sanitize_media,
+    sanitize_person,
+    sanitize_place,
+    sanitize_repository,
+    sanitize_source,
+)
 from gramps.gen.proxy.proxybase import ProxyDbBase
 from gramps.gen.user import UserBase
 from gramps.gen.utils.grampslocale import GrampsLocale
@@ -261,6 +270,60 @@ class ModifiedPrivateProxyDb(PrivateProxyDb):
             return self._iter_handles(NOTE_KEY)
         return filter(self.include_note, self.db.iter_note_handles())
 
+    def iter_people(self):
+        """Return an iterator over Person objects, filtered and sanitized."""
+        for obj in self.db.iter_people():
+            if not obj.get_privacy():
+                yield sanitize_person(self.db, obj)
+
+    def iter_families(self):
+        """Return an iterator over Family objects, filtered and sanitized."""
+        for obj in self.db.iter_families():
+            if not obj.get_privacy():
+                yield sanitize_family(self.db, obj)
+
+    def iter_events(self):
+        """Return an iterator over Event objects, filtered and sanitized."""
+        for obj in self.db.iter_events():
+            if not obj.get_privacy():
+                yield sanitize_event(self.db, obj)
+
+    def iter_places(self):
+        """Return an iterator over Place objects, filtered and sanitized."""
+        for obj in self.db.iter_places():
+            if not obj.get_privacy():
+                yield sanitize_place(self.db, obj)
+
+    def iter_sources(self):
+        """Return an iterator over Source objects, filtered and sanitized."""
+        for obj in self.db.iter_sources():
+            if not obj.get_privacy():
+                yield sanitize_source(self.db, obj)
+
+    def iter_citations(self):
+        """Return an iterator over Citation objects, filtered and sanitized."""
+        for obj in self.db.iter_citations():
+            if not obj.get_privacy():
+                yield sanitize_citation(self.db, obj)
+
+    def iter_media(self):
+        """Return an iterator over Media objects, filtered and sanitized."""
+        for obj in self.db.iter_media():
+            if not obj.get_privacy():
+                yield _sanitize_media_patched(self.db, obj)
+
+    def iter_repositories(self):
+        """Return an iterator over Repository objects, filtered and sanitized."""
+        for obj in self.db.iter_repositories():
+            if not obj.get_privacy():
+                yield sanitize_repository(self.db, obj)
+
+    def iter_notes(self):
+        """Return an iterator over Note objects, filtered (nothing to sanitize)."""
+        for obj in self.db.iter_notes():
+            if not obj.get_privacy():
+                yield obj
+
 
 class UserTaskProgress(UserBase):
     """Web API specific implementation of `gramps.gen.user.UserBase`.
@@ -373,7 +436,11 @@ def get_tree_from_jwt() -> str | None:
     Needs request context. Can return None if no tree ID is present,
     e.g. for e-mail confirmation or password reset tokens.
     """
-    claims = get_jwt()
+    try:
+        claims = get_jwt()
+    except WrongTokenError:
+        # wrong token type, so no tree ID
+        return None
     return claims.get("tree")
 
 
@@ -510,6 +577,26 @@ def get_buffer_for_file(filename: str, delete=True, not_found=False) -> BinaryIO
     return buffer
 
 
+def _resolve_smtp_config(
+    use_ssl: bool | None, use_starttls: bool | None, use_tls: bool | None, port: int
+) -> tuple[bool, bool]:
+    """Helper to resolve SMTP encryption settings.
+
+    Return tuple[bool, bool]: (use_ssl, use_starttls)"""
+    if use_ssl is True:
+        return True, False
+    if use_starttls is True:
+        return False, True
+
+    if use_ssl is False or use_starttls is False:
+        return False, False
+
+    if use_tls:
+        return True, False
+    else:
+        return False, (port != 25)
+
+
 def send_email(
     subject: str,
     body: str,
@@ -528,22 +615,38 @@ def send_email(
     msg["From"] = from_email
     msg["To"] = ", ".join(to)
     msg["Message-ID"] = make_msgid()
+    msg["Date"] = formatdate(localtime=True)
 
     host = get_config("EMAIL_HOST")
     port = int(get_config("EMAIL_PORT"))
     user = get_config("EMAIL_HOST_USER")
     password = get_config("EMAIL_HOST_PASSWORD")
+    use_ssl = get_config("EMAIL_USE_SSL")
+    use_starttls = get_config("EMAIL_USE_STARTTLS")
     use_tls = get_config("EMAIL_USE_TLS")
+
+    if use_ssl is None and use_starttls is None and use_tls is not None:
+        current_app.logger.warning(
+            "EMAIL_USE_TLS is deprecated. Use EMAIL_USE_SSL or EMAIL_USE_STARTTLS instead."
+        )
+
+    # Resolve config
+    use_ssl, use_starttls = _resolve_smtp_config(use_ssl, use_starttls, use_tls, port)
+
     try:
         smtp: smtplib.SMTP | smtplib.SMTP_SSL
-        if use_tls:
+        if use_ssl:
             smtp = smtplib.SMTP_SSL(host=host, port=port, timeout=10)
+            smtp.ehlo()
+        elif use_starttls:
+            smtp = smtplib.SMTP(host=host, port=port, timeout=10)
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.ehlo()
         else:
             smtp = smtplib.SMTP(host=host, port=port, timeout=10)
             smtp.ehlo()
-            if port != 25:
-                smtp.starttls()
-                smtp.ehlo()
+
         if user:
             smtp.login(user, password)
         smtp.send_message(msg)
@@ -587,12 +690,16 @@ def get_tree_id(guid: str) -> str:
             # multi-tree support enabled but user has no tree ID: forbidden!
             abort_with_message(403, "Forbidden")
         # needed for backwards compatibility: single-tree mode but user without tree ID
-        dbmgr = WebDbManager(
-            name=current_app.config["TREE"],
-            create_if_missing=False,
-            ignore_lock=current_app.config["IGNORE_DB_LOCK"],
-        )
-        tree_id = dbmgr.dirname
+        if current_app.config.get("TREE_ID"):
+            # TREE_ID is set: use dirname directly, never look up by name
+            tree_id = current_app.config["TREE_ID"]
+        else:
+            dbmgr = WebDbManager(
+                name=current_app.config["TREE"],
+                create_if_missing=False,
+                ignore_lock=current_app.config["IGNORE_DB_LOCK"],
+            )
+            tree_id = dbmgr.dirname
     return tree_id
 
 
@@ -770,9 +877,40 @@ def complete_gramps_object_dict(data: dict[str, Any]):
     return data
 
 
+def recalc_date_sortvals(data: Any) -> Any:
+    """Recompute the ``sortval`` of every embedded ``Date`` in an object dict.
+
+    Gramps Web stores whatever a client sends, and ``Date`` deserialization does not
+    recalculate ``sortval`` from ``dateval`` — so a stale, zero, or missing ``sortval``
+    is persisted verbatim and silently breaks date sorting (gramps-project/gramps-web-api#869).
+    This walks the dict and, for every serialized ``Date``, lets Gramps recompute
+    ``sortval`` from ``dateval`` (correct across calendars, modifiers, and BCE dates).
+    Modifies ``data`` in place and returns it.
+    """
+    if isinstance(data, dict):
+        if data.get("_class") == "Date" and "dateval" in data:
+            try:
+                date = data_to_object(data)
+                date.recalc_sort_value()
+                data["sortval"] = date.sortval
+            except Exception:  # pragma: no cover - never block a write on one bad date
+                pass
+        else:
+            for value in data.values():
+                recalc_date_sortvals(value)
+    elif isinstance(data, list):
+        for value in data:
+            recalc_date_sortvals(value)
+    return data
+
+
 def gramps_object_from_dict(data: dict[str, Any]):
     """Instantiate a Gramps object from a dictionary.
 
     The dictionary can be incomplete, i.e. not contain all properties of
     the object class."""
-    return data_to_object(complete_gramps_object_dict(data))
+    completed = complete_gramps_object_dict(data)
+    # Keep Date sortval authoritative on write (gramps-web-api#869): the client's
+    # value is not to be trusted, since sorting depends on it.
+    recalc_date_sortvals(completed)
+    return data_to_object(completed)

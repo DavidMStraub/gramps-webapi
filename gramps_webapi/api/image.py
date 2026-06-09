@@ -23,6 +23,7 @@ import io
 import os
 import shutil
 import tempfile
+from importlib.resources import as_file, files
 from pathlib import Path
 from typing import BinaryIO, Callable
 
@@ -30,7 +31,6 @@ import ffmpeg
 from pdf2image import convert_from_path
 from PIL import Image, ImageOps
 from PIL.Image import Image as ImageType
-from pkg_resources import resource_filename  # type: ignore[import-untyped]
 
 from gramps_webapi.const import MIME_PDF
 from gramps_webapi.types import FilenameOrPath
@@ -78,6 +78,10 @@ def crop_image(image: ImageType, x1: int, y1: int, x2: int, y2: int) -> ImageTyp
     The arguments `x1`, `y1`, `x2`, `y2` are the coordinates of the cropped region
     in percent.
     """
+    # Apply EXIF orientation before cropping so that the percentage coordinates
+    # (which are defined in display/viewing space) map to the correct pixels.
+    image = ImageOps.exif_transpose(image)
+    assert image is not None  # for type checker
     width, height = image.size
     x1_abs = x1 * width / 100
     x2_abs = x2 * width / 100
@@ -86,10 +90,13 @@ def crop_image(image: ImageType, x1: int, y1: int, x2: int, y2: int) -> ImageTyp
     return image.crop((x1_abs, y1_abs, x2_abs, y2_abs))
 
 
-def save_image_buffer(image: ImageType, fmt="JPEG") -> BinaryIO:
+def save_image_buffer(image: ImageType, fmt="AVIF") -> BinaryIO:
     """Save an image to a binary buffer."""
     buffer = io.BytesIO()
-    if image.mode != "RGB":
+    supports_alpha = fmt.upper() in ("AVIF", "PNG", "WEBP")
+    if image.mode == "RGBA" and not supports_alpha:
+        image = image.convert("RGB")
+    elif image.mode not in ("RGB", "RGBA"):
         image = image.convert("RGB")
     image.save(buffer, format=fmt)
     buffer.seek(0)
@@ -129,7 +136,13 @@ class ThumbnailHandler:
         return Image.open(self.stream)
 
     def get_cropped(
-        self, x1: int, y1: int, x2: int, y2: int, square: bool = False
+        self,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        square: bool = False,
+        fmt: str = "AVIF",
     ) -> BinaryIO:
         """Return a cropped version of the image at `path`.
 
@@ -142,12 +155,17 @@ class ThumbnailHandler:
         img = crop_image(img, x1, y1, x2, y2)
         if square:
             img = image_square(img)
-        return save_image_buffer(img)
+        return save_image_buffer(img, fmt=fmt)
 
     def _get_image_pdf(self) -> ImageType:
         """Get a Pillow Image instance of the PDF's first page."""
         ims = self._apply_to_path(
-            convert_from_path, single_file=True, use_cropbox=True, dpi=100
+            convert_from_path,
+            first_page=1,
+            last_page=1,
+            use_cropbox=True,
+            dpi=100,
+            size=(2000, 2000),
         )
         return ims[0]
 
@@ -179,7 +197,7 @@ class ThumbnailHandler:
         return Image.open(io.BytesIO(out))
 
     def get_thumbnail(
-        self, size: int, square: bool = False, fmt: str = "JPEG"
+        self, size: int, square: bool = False, fmt: str = "AVIF"
     ) -> BinaryIO:
         """Return a thumbnail of `size` (longest side) for the image.
 
@@ -190,7 +208,14 @@ class ThumbnailHandler:
         return save_image_buffer(img, fmt=fmt)
 
     def get_thumbnail_cropped(
-        self, size: int, x1: int, y1: int, x2: int, y2: int, square: bool = False
+        self,
+        size: int,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        square: bool = False,
+        fmt: str = "AVIF",
     ) -> BinaryIO:
         """Return a cropped thumbnail of `size` (longest side) of the image at `path`.
 
@@ -202,7 +227,7 @@ class ThumbnailHandler:
         img = self.get_image()
         img = crop_image(img, x1, y1, x2, y2)
         img = image_thumbnail(image=img, size=size, square=square)
-        return save_image_buffer(img)
+        return save_image_buffer(img, fmt=fmt)
 
 
 class LocalFileThumbnailHandler(ThumbnailHandler):
@@ -227,14 +252,14 @@ def detect_faces(stream: BinaryIO) -> list[tuple[float, float, float, float]]:
 
     file_bytes = np.asarray(bytearray(stream.read()), dtype=np.uint8)
     cv_image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    assert cv_image is not None, "cv_image is None"  # for type checker
 
     # Load the YuNet model
-    model_path = resource_filename(
-        "gramps_webapi", "data/face_detection_yunet_2023mar.onnx"
-    )
-    face_detector = cv2.FaceDetectorYN.create(
-        model_path, "", (320, 320), score_threshold=0.5
-    )
+    ref = files("gramps_webapi") / "data/face_detection_yunet_2023mar.onnx"
+    with as_file(ref) as model_path:
+        face_detector = cv2.FaceDetectorYN.create(
+            str(model_path), "", (320, 320), score_threshold=0.5
+        )
 
     # Set input image size for YuNet
     height, width, _ = cv_image.shape
@@ -250,11 +275,7 @@ def detect_faces(stream: BinaryIO) -> list[tuple[float, float, float, float]]:
     # Extract and normalize face bounding boxes
     detected_faces = []
     for face in faces[1]:
-        x, y, w, h = np.asarray(face)[:4]
-        x = float(x)
-        y = float(y)
-        w = float(w)
-        h = float(h)
+        x, y, w, h = map(float, np.asarray(face)[:4])
         detected_faces.append(
             (
                 100 * x / width,

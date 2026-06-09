@@ -24,16 +24,17 @@ import uuid
 import unittest
 
 from jsonschema import validate
-
 from gramps_webapi.const import GRAMPS_NAMESPACES
 
-from . import API_RESOLVER, API_SCHEMA, BASE_URL, get_test_client
+from . import BASE_URL, get_single_tree_test_client, get_test_client
 from .checks import (
     check_filter_create_update_delete,
+    check_filter_multi_tree_blocked,
     check_invalid_semantics,
     check_requires_token,
     check_resource_missing,
     check_success,
+    get_openapi_schema_validator,
 )
 from .util import fetch_header
 
@@ -55,12 +56,14 @@ class TestAllFilters(unittest.TestCase):
     def test_get_filters_conforms_to_schema(self):
         """Test conforms to schema."""
         rv = check_success(self, TEST_URL)
+        schema, resolver = get_openapi_schema_validator(self.client, "NamespaceFilters")
+
         for namespace in GRAMPS_NAMESPACES:
             self.assertIn(namespace, rv)
             validate(
                 instance=rv[namespace],
-                schema=API_SCHEMA["definitions"]["NamespaceFilters"],
-                resolver=API_RESOLVER,
+                schema=schema,
+                resolver=resolver,
             )
 
     def test_get_filters_validate_sematics(self):
@@ -103,13 +106,17 @@ class TestFilters(unittest.TestCase):
 
     def test_get_filters_namespace_rules_conform_to_schema(self):
         """Test all namespace rule sets conform to schema."""
+        schema, resolver = get_openapi_schema_validator(
+            self.client, "FilterRuleDescription"
+        )
+
         for namespace in GRAMPS_NAMESPACES:
             rv = check_success(self, TEST_URL + namespace)
             for rule in rv["rules"]:
                 validate(
                     instance=rule,
-                    schema=API_SCHEMA["definitions"]["FilterRuleDescription"],
-                    resolver=API_RESOLVER,
+                    schema=schema,
+                    resolver=resolver,
                 )
 
     def test_get_filters_namespace_rules_validate_semantics(self):
@@ -148,120 +155,161 @@ class TestFilters(unittest.TestCase):
 
 
 class TestFiltersPeople(unittest.TestCase):
-    """Specific test cases for the /api/filters/people endpoint."""
+    """Test /api/filters/people in multi-tree setup (write ops must be blocked)."""
 
     @classmethod
     def setUpClass(cls):
         """Test class setup."""
         cls.client = get_test_client()
+
+    def test_filter_write_blocked_multi_tree(self):
+        """Test that filter mutations return 405 in multi-tree setup."""
+        check_filter_multi_tree_blocked(self, TEST_URL, "people")
+
+
+class TestFiltersFamilies(unittest.TestCase):
+    """Test /api/filters/families in multi-tree setup (write ops must be blocked)."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Test class setup."""
+        cls.client = get_test_client()
+
+    def test_filter_write_blocked_multi_tree(self):
+        """Test that filter mutations return 405 in multi-tree setup."""
+        check_filter_multi_tree_blocked(self, TEST_URL, "families")
+
+
+class TestFiltersEvents(unittest.TestCase):
+    """Test /api/filters/events in multi-tree setup (write ops must be blocked)."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Test class setup."""
+        cls.client = get_test_client()
+
+    def test_filter_write_blocked_multi_tree(self):
+        """Test that filter mutations return 405 in multi-tree setup."""
+        check_filter_multi_tree_blocked(self, TEST_URL, "events")
+
+
+class TestFiltersPlaces(unittest.TestCase):
+    """Test /api/filters/places in multi-tree setup (write ops must be blocked)."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Test class setup."""
+        cls.client = get_test_client()
+
+    def test_filter_write_blocked_multi_tree(self):
+        """Test that filter mutations return 405 in multi-tree setup."""
+        check_filter_multi_tree_blocked(self, TEST_URL, "places")
+
+
+class TestFiltersCitations(unittest.TestCase):
+    """Test /api/filters/citations in multi-tree setup (write ops must be blocked)."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Test class setup."""
+        cls.client = get_test_client()
+
+    def test_filter_write_blocked_multi_tree(self):
+        """Test that filter mutations return 405 in multi-tree setup."""
+        check_filter_multi_tree_blocked(self, TEST_URL, "citations")
+
+
+class TestFiltersSources(unittest.TestCase):
+    """Test /api/filters/sources in multi-tree setup (write ops must be blocked)."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Test class setup."""
+        cls.client = get_test_client()
+
+    def test_filter_write_blocked_multi_tree(self):
+        """Test that filter mutations return 405 in multi-tree setup."""
+        check_filter_multi_tree_blocked(self, TEST_URL, "sources")
+
+
+class TestFiltersRepositories(unittest.TestCase):
+    """Test /api/filters/repositories in multi-tree setup (write ops must be blocked)."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Test class setup."""
+        cls.client = get_test_client()
+
+    def test_filter_write_blocked_multi_tree(self):
+        """Test that filter mutations return 405 in multi-tree setup."""
+        check_filter_multi_tree_blocked(self, TEST_URL, "repositories")
+
+
+class TestFiltersMedia(unittest.TestCase):
+    """Test /api/filters/media in multi-tree setup (write ops must be blocked)."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Test class setup."""
+        cls.client = get_test_client()
+
+    def test_filter_write_blocked_multi_tree(self):
+        """Test that filter mutations return 405 in multi-tree setup."""
+        check_filter_multi_tree_blocked(self, TEST_URL, "media")
+
+
+class TestFiltersNotes(unittest.TestCase):
+    """Test /api/filters/notes in multi-tree setup (write ops must be blocked)."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Test class setup."""
+        cls.client = get_test_client()
+
+    def test_filter_write_blocked_multi_tree(self):
+        """Test that filter mutations return 405 in multi-tree setup."""
+        check_filter_multi_tree_blocked(self, TEST_URL, "notes")
+
+
+class TestFiltersPeopleSingleTree(unittest.TestCase):
+    """Test /api/filters/people CRUD in single-tree setup."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Test class setup."""
+        cls.client = get_single_tree_test_client()
 
     def test_filter_create_update_delete(self):
         """Test creation, application, update, and deletion of filter."""
         check_filter_create_update_delete(self, BASE_URL, TEST_URL, "people")
 
+    def test_filter_write_requires_editor(self):
+        """Test that POST, PUT, DELETE all require at least editor role."""
+        from gramps_webapi.auth.const import ROLE_MEMBER
 
-class TestFiltersFamilies(unittest.TestCase):
-    """Specific test cases for the /api/filters/families endpoint."""
+        header = fetch_header(self.client, role=ROLE_MEMBER)
 
-    @classmethod
-    def setUpClass(cls):
-        """Test class setup."""
-        cls.client = get_test_client()
+        # POST blocked for non-editor on people
+        payload = {
+            "name": "PeoplePermissionTestFilter",
+            "rules": [{"name": "HasTag", "values": ["ToDo"]}],
+        }
+        rv = self.client.post(TEST_URL + "people", json=payload, headers=header)
+        self.assertEqual(rv.status_code, 403)
 
-    def test_filters_endpoint_families_filter(self):
-        """Test creation and application of a families filter."""
-        check_filter_create_update_delete(self, BASE_URL, TEST_URL, "families")
+        # PUT blocked for non-editor on events (different namespace)
+        payload = {
+            "name": "EventsPermissionTestFilter",
+            "rules": [{"name": "HasTag", "values": ["ToDo"]}],
+        }
+        rv = self.client.put(TEST_URL + "events", json=payload, headers=header)
+        self.assertEqual(rv.status_code, 403)
 
-
-class TestFiltersEvents(unittest.TestCase):
-    """Specific test cases for the /api/filters/events endpoint."""
-
-    @classmethod
-    def setUpClass(cls):
-        """Test class setup."""
-        cls.client = get_test_client()
-
-    def test_filters_endpoint_events_filter(self):
-        """Test creation and application of an events filter."""
-        check_filter_create_update_delete(self, BASE_URL, TEST_URL, "events")
-
-
-class TestFiltersPlaces(unittest.TestCase):
-    """Specific test cases for the /api/filters/places endpoint."""
-
-    @classmethod
-    def setUpClass(cls):
-        """Test class setup."""
-        cls.client = get_test_client()
-
-    def test_filters_endpoint_places_filter(self):
-        """Test creation and application of a places filter."""
-        check_filter_create_update_delete(self, BASE_URL, TEST_URL, "places")
-
-
-class TestFiltersCitations(unittest.TestCase):
-    """Specific test cases for the /api/filters/citations endpoint."""
-
-    @classmethod
-    def setUpClass(cls):
-        """Test class setup."""
-        cls.client = get_test_client()
-
-    def test_filters_endpoint_citations_filter(self):
-        """Test creation and application of a citations filter."""
-        check_filter_create_update_delete(self, BASE_URL, TEST_URL, "citations")
-
-
-class TestFiltersSources(unittest.TestCase):
-    """Specific test cases for the /api/filters/sources endpoint."""
-
-    @classmethod
-    def setUpClass(cls):
-        """Test class setup."""
-        cls.client = get_test_client()
-
-    def test_filters_endpoint_sources_filter(self):
-        """Test creation and application of a sources filter."""
-        check_filter_create_update_delete(self, BASE_URL, TEST_URL, "sources")
-
-
-class TestFiltersRepositories(unittest.TestCase):
-    """Specific test cases for the /api/filters/repositories endpoint."""
-
-    @classmethod
-    def setUpClass(cls):
-        """Test class setup."""
-        cls.client = get_test_client()
-
-    def test_filters_endpoint_repositories_filter(self):
-        """Test creation and application of a repositories filter."""
-        check_filter_create_update_delete(self, BASE_URL, TEST_URL, "repositories")
-
-
-class TestFiltersMedia(unittest.TestCase):
-    """Specific test cases for the /api/filters/media endpoint."""
-
-    @classmethod
-    def setUpClass(cls):
-        """Test class setup."""
-        cls.client = get_test_client()
-
-    def test_filters_endpoint_media_filter(self):
-        """Test creation and application of a media filter."""
-        check_filter_create_update_delete(self, BASE_URL, TEST_URL, "media")
-
-
-class TestFiltersNotes(unittest.TestCase):
-    """Specific test cases for the /api/filters/notes endpoint."""
-
-    @classmethod
-    def setUpClass(cls):
-        """Test class setup."""
-        cls.client = get_test_client()
-
-    def test_filters_endpoint_notes_filter(self):
-        """Test creation and application of a notes filter."""
-        check_filter_create_update_delete(self, BASE_URL, TEST_URL, "notes")
+        # DELETE blocked for non-editor on events
+        rv = self.client.delete(
+            TEST_URL + "events/EventsPermissionTestFilter", headers=header
+        )
+        self.assertEqual(rv.status_code, 403)
 
 
 def make_handle() -> str:
@@ -313,3 +361,498 @@ class TestHasAssociationType(unittest.TestCase):
         # no result
         rv = self.client.get(url, headers=headers)
         assert rv.json == []
+
+
+class TestIsReferencedByObjectType(unittest.TestCase):
+    """Test cases for the IsReferencedByObjectType filter."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Test class setup."""
+        cls.client = get_test_client()
+
+    def test_is_referenced_by_object_type(self):
+        """Test filtering media by the type of object referencing it."""
+        media_handle = make_handle()
+        person_handle = make_handle()
+        headers = fetch_header(self.client)
+        url = '/api/media/?rules={"rules":[{"name":"IsReferencedByObjectType","values":["Person"]}]}'
+        url_event = '/api/media/?rules={"rules":[{"name":"IsReferencedByObjectType","values":["Event"]}]}'
+
+        def handles(rv):
+            return {obj["handle"] for obj in rv.json}
+
+        # add media object (unreferenced) via /api/objects/
+        media_payload = {"_class": "Media", "handle": media_handle}
+        rv = self.client.post("/api/objects/", json=[media_payload], headers=headers)
+        assert rv.status_code == 201
+
+        # not yet referenced by any person → handle absent from Person filter
+        rv = self.client.get(url, headers=headers)
+        assert media_handle not in handles(rv)
+
+        # not referenced by any event either
+        rv = self.client.get(url_event, headers=headers)
+        assert media_handle not in handles(rv)
+
+        # add person with a media reference
+        person_payload = {
+            "_class": "Person",
+            "handle": person_handle,
+            "media_list": [{"_class": "MediaRef", "ref": media_handle}],
+        }
+        rv = self.client.post("/api/people/", json=person_payload, headers=headers)
+        assert rv.status_code == 201
+
+        # now the media handle appears in Person filter results
+        rv = self.client.get(url, headers=headers)
+        assert media_handle in handles(rv)
+
+        # still absent from Event filter
+        rv = self.client.get(url_event, headers=headers)
+        assert media_handle not in handles(rv)
+
+        # clean up
+        rv = self.client.delete(f"/api/people/{person_handle}", headers=headers)
+        assert rv.status_code == 200
+        rv = self.client.delete(f"/api/media/{media_handle}", headers=headers)
+        assert rv.status_code == 200
+
+        # handle gone from Person filter after cleanup
+        rv = self.client.get(url, headers=headers)
+        assert media_handle not in handles(rv)
+
+
+class TestExpandedRuleList(unittest.TestCase):
+    """Previously excluded rules (not in editor_rule_list) are now available."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = get_test_client()
+
+    def test_match_id_of_rule_available_in_rule_list(self):
+        """MatchIdOf appears in the people rule list."""
+        headers = fetch_header(self.client)
+        rv = self.client.get(
+            BASE_URL + "/filters/people?rules=MatchIdOf", headers=headers
+        )
+        assert rv.status_code == 200
+        assert rv.json["rules"][0]["rule"] == "MatchIdOf"
+
+    def test_match_id_of_filters_by_gramps_id(self):
+        """MatchIdOf returns the person with the given Gramps ID."""
+        handle = make_handle()
+        gramps_id = "I_TEST_MATCHID_" + handle[:8]
+        headers = fetch_header(self.client)
+        rv = self.client.post(
+            "/api/people/",
+            json={"_class": "Person", "handle": handle, "gramps_id": gramps_id},
+            headers=headers,
+        )
+        assert rv.status_code == 201
+
+        import json as _json
+
+        rv = self.client.get(
+            "/api/people/",
+            query_string={
+                "rules": _json.dumps(
+                    {"rules": [{"name": "MatchIdOf", "values": [gramps_id]}]},
+                    separators=(",", ":"),
+                )
+            },
+            headers=headers,
+        )
+        assert rv.status_code == 200
+        assert len(rv.json) == 1
+        assert rv.json[0]["handle"] == handle
+
+        rv = self.client.delete(f"/api/people/{handle}", headers=headers)
+        assert rv.status_code == 200
+
+    def test_search_name_rule_available(self):
+        """SearchName appears in the people rule list."""
+        headers = fetch_header(self.client)
+        rv = self.client.get(
+            BASE_URL + "/filters/people?rules=SearchName", headers=headers
+        )
+        assert rv.status_code == 200
+        assert rv.json["rules"][0]["rule"] == "SearchName"
+
+
+class TestNestedFilters(unittest.TestCase):
+    """Inline nested filter composition using sub-filter specs inside rules."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = get_test_client()
+        headers = fetch_header(cls.client)
+
+        # Three fixtures: one with DNA association only, one with neither,
+        # one with both DNA association and a known Gramps ID.
+        cls.handle_dna = make_handle()
+        cls.handle_no_dna = make_handle()
+        cls.handle_dna_and_id = make_handle()
+        cls.special_id = "I_NESTED_" + cls.handle_dna_and_id[:8]
+
+        rv = cls.client.post(
+            "/api/people/",
+            json={
+                "_class": "Person",
+                "handle": cls.handle_dna,
+                "person_ref_list": [
+                    {"_class": "PersonRef", "rel": "DNA", "ref": cls.handle_dna}
+                ],
+            },
+            headers=headers,
+        )
+        assert rv.status_code == 201
+
+        rv = cls.client.post(
+            "/api/people/",
+            json={"_class": "Person", "handle": cls.handle_no_dna},
+            headers=headers,
+        )
+        assert rv.status_code == 201
+
+        rv = cls.client.post(
+            "/api/people/",
+            json={
+                "_class": "Person",
+                "handle": cls.handle_dna_and_id,
+                "gramps_id": cls.special_id,
+                "person_ref_list": [
+                    {
+                        "_class": "PersonRef",
+                        "rel": "DNA",
+                        "ref": cls.handle_dna_and_id,
+                    }
+                ],
+            },
+            headers=headers,
+        )
+        assert rv.status_code == 201
+
+    @classmethod
+    def tearDownClass(cls):
+        headers = fetch_header(cls.client)
+        for handle in [cls.handle_dna, cls.handle_no_dna, cls.handle_dna_and_id]:
+            rv = cls.client.delete(f"/api/people/{handle}", headers=headers)
+            assert rv.status_code in (200, 204), (
+                f"Failed to delete fixture person {handle}: "
+                f"unexpected status {rv.status_code}"
+            )
+
+    def _get_handles(self, filter_dict: dict) -> set:
+        import json as _json
+
+        headers = fetch_header(self.client)
+        rv = self.client.get(
+            "/api/people/",
+            query_string={"rules": _json.dumps(filter_dict, separators=(",", ":"))},
+            headers=headers,
+        )
+        assert rv.status_code == 200
+        return {obj["handle"] for obj in rv.json}
+
+    def _filter_status(self, filter_dict: dict) -> int:
+        import json as _json
+
+        headers = fetch_header(self.client)
+        rv = self.client.get(
+            "/api/people/",
+            query_string={"rules": _json.dumps(filter_dict, separators=(",", ":"))},
+            headers=headers,
+        )
+        return rv.status_code
+
+    def test_or_nested_filter(self):
+        """OR sub-filter: handle_dna OR handle_dna_and_id via MatchIdOf OR HasAssociationType."""
+        # Rule 1: HasAssociationType=DNA  → matches handle_dna and handle_dna_and_id
+        # Rule 2: MatchIdOf=special_id    → matches handle_dna_and_id only
+        # OR result should include both DNA handles.
+        result = self._get_handles({
+            "function": "or",
+            "rules": [
+                {"name": "HasAssociationType", "values": ["DNA"]},
+                {"name": "MatchIdOf", "values": [self.special_id]},
+            ],
+        })
+        assert self.handle_dna in result
+        assert self.handle_dna_and_id in result
+        assert self.handle_no_dna not in result
+
+    def test_and_nested_filter(self):
+        """AND composition: HasAssociationType=DNA AND MatchIdOf=special_id."""
+        result = self._get_handles({
+            "function": "and",
+            "rules": [
+                {"name": "HasAssociationType", "values": ["DNA"]},
+                {"name": "MatchIdOf", "values": [self.special_id]},
+            ],
+        })
+        # Only handle_dna_and_id satisfies both
+        assert self.handle_dna_and_id in result
+        assert self.handle_dna not in result
+        assert self.handle_no_dna not in result
+
+    def test_inline_sub_filter(self):
+        """Nested sub-filter: outer AND contains an inner OR sub-filter."""
+        # Outer AND:
+        #   - leaf: MatchIdOf=special_id              → only handle_dna_and_id
+        #   - sub-filter OR: HasAssociationType=DNA   → handle_dna and handle_dna_and_id
+        # AND of the two → only handle_dna_and_id
+        result = self._get_handles({
+            "function": "and",
+            "rules": [
+                {"name": "MatchIdOf", "values": [self.special_id]},
+                {
+                    "function": "or",
+                    "rules": [{"name": "HasAssociationType", "values": ["DNA"]}],
+                },
+            ],
+        })
+        assert self.handle_dna_and_id in result
+        assert self.handle_dna not in result
+        assert self.handle_no_dna not in result
+
+    def test_invert_on_sub_filter(self):
+        """invert on a sub-filter inverts that sub-filter's result."""
+        # Outer AND:
+        #   - leaf: HasAssociationType=DNA              → handle_dna, handle_dna_and_id
+        #   - sub-filter OR + invert: NOT MatchIdOf     → everyone except handle_dna_and_id
+        # AND → handle_dna only
+        result = self._get_handles({
+            "function": "and",
+            "rules": [
+                {"name": "HasAssociationType", "values": ["DNA"]},
+                {
+                    "function": "or",
+                    "invert": True,
+                    "rules": [{"name": "MatchIdOf", "values": [self.special_id]}],
+                },
+            ],
+        })
+        assert self.handle_dna in result
+        assert self.handle_dna_and_id not in result
+
+    def test_invalid_rule_name_returns_404(self):
+        """Unknown rule name in a nested filter returns 404."""
+        assert self._filter_status(
+            {"rules": [{"name": "NonExistentRuleXYZ", "values": []}]}
+        ) == 404
+
+    def test_missing_name_and_rules_returns_422(self):
+        """A rules item with neither 'name' nor 'rules' fails schema validation."""
+        assert self._filter_status({"rules": [{"values": ["something"]}]}) == 422
+
+
+class TestCrossNamespaceFilters(unittest.TestCase):
+    """Cross-namespace sub-filters using the namespace field on nested groups."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = get_test_client()
+        headers = fetch_header(cls.client)
+
+        cls.place_handle = make_handle()
+        cls.other_place_handle = make_handle()
+        cls.event_handle = make_handle()
+        cls.other_event_handle = make_handle()
+        cls.person_handle = make_handle()
+        cls.person_no_match_handle = make_handle()
+        cls.family_handle = make_handle()
+        cls.family_no_match_handle = make_handle()
+
+        # Two places with distinct titles
+        rv = cls.client.post(
+            "/api/places/",
+            json={
+                "_class": "Place",
+                "handle": cls.place_handle,
+                "name": {"_class": "PlaceName", "value": "XNS_TestPlace"},
+            },
+            headers=headers,
+        )
+        assert rv.status_code == 201
+
+        rv = cls.client.post(
+            "/api/places/",
+            json={
+                "_class": "Place",
+                "handle": cls.other_place_handle,
+                "name": {"_class": "PlaceName", "value": "XNS_OtherPlace"},
+            },
+            headers=headers,
+        )
+        assert rv.status_code == 201
+
+        # Event at the test place
+        rv = cls.client.post(
+            "/api/events/",
+            json={
+                "_class": "Event",
+                "handle": cls.event_handle,
+                "place": cls.place_handle,
+            },
+            headers=headers,
+        )
+        assert rv.status_code == 201
+
+        # Event at the other place
+        rv = cls.client.post(
+            "/api/events/",
+            json={
+                "_class": "Event",
+                "handle": cls.other_event_handle,
+                "place": cls.other_place_handle,
+            },
+            headers=headers,
+        )
+        assert rv.status_code == 201
+
+        # Person with an event ref to the test event (matches filter)
+        rv = cls.client.post(
+            "/api/people/",
+            json={
+                "_class": "Person",
+                "handle": cls.person_handle,
+                "event_ref_list": [
+                    {"_class": "EventRef", "ref": cls.event_handle, "role": {"_class": "EventRoleType", "string": "Primary"}}
+                ],
+            },
+            headers=headers,
+        )
+        assert rv.status_code == 201
+
+        # Person with an event ref to the other event only (must not match filter)
+        rv = cls.client.post(
+            "/api/people/",
+            json={
+                "_class": "Person",
+                "handle": cls.person_no_match_handle,
+                "event_ref_list": [
+                    {"_class": "EventRef", "ref": cls.other_event_handle, "role": {"_class": "EventRoleType", "string": "Primary"}}
+                ],
+            },
+            headers=headers,
+        )
+        assert rv.status_code == 201
+
+        # Family with an event ref to the test event (matches filter)
+        rv = cls.client.post(
+            "/api/families/",
+            json={
+                "_class": "Family",
+                "handle": cls.family_handle,
+                "event_ref_list": [
+                    {"_class": "EventRef", "ref": cls.event_handle, "role": {"_class": "EventRoleType", "string": "Family"}}
+                ],
+            },
+            headers=headers,
+        )
+        assert rv.status_code == 201
+
+        # Family with an event ref to the other event only (must not match filter)
+        rv = cls.client.post(
+            "/api/families/",
+            json={
+                "_class": "Family",
+                "handle": cls.family_no_match_handle,
+                "event_ref_list": [
+                    {"_class": "EventRef", "ref": cls.other_event_handle, "role": {"_class": "EventRoleType", "string": "Family"}}
+                ],
+            },
+            headers=headers,
+        )
+        assert rv.status_code == 201
+
+    @classmethod
+    def tearDownClass(cls):
+        headers = fetch_header(cls.client)
+        for endpoint, handle in [
+            ("/api/families/", cls.family_no_match_handle),
+            ("/api/families/", cls.family_handle),
+            ("/api/people/", cls.person_no_match_handle),
+            ("/api/people/", cls.person_handle),
+            ("/api/events/", cls.event_handle),
+            ("/api/events/", cls.other_event_handle),
+            ("/api/places/", cls.place_handle),
+            ("/api/places/", cls.other_place_handle),
+        ]:
+            rv = cls.client.delete(f"{endpoint}{handle}", headers=headers)
+            assert rv.status_code in (200, 204)
+
+    def _query(self, endpoint: str, filter_dict: dict) -> tuple[int, set]:
+        import json as _json
+        headers = fetch_header(self.client)
+        rv = self.client.get(
+            endpoint,
+            query_string={"rules": _json.dumps(filter_dict, separators=(",", ":"))},
+            headers=headers,
+        )
+        handles = (
+            {obj["handle"] for obj in rv.json}
+            if isinstance(rv.json, list)
+            else set()
+        )
+        return rv.status_code, handles
+
+    def test_event_place_sub_filter(self):
+        """Events filtered by a Place sub-filter (Event→Place bridge)."""
+        status, handles = self._query(
+            "/api/events/",
+            {
+                "rules": [{
+                    "namespace": "Place",
+                    "rules": [{"name": "HasTitle", "values": ["XNS_TestPlace"]}],
+                }]
+            },
+        )
+        assert status == 200
+        assert self.event_handle in handles
+        assert self.other_event_handle not in handles
+
+    def test_person_event_place_sub_filter(self):
+        """People filtered by Event→Place deep sub-filter (Person→Event→Place)."""
+        status, handles = self._query(
+            "/api/people/",
+            {
+                "rules": [{
+                    "namespace": "Event",
+                    "rules": [{
+                        "namespace": "Place",
+                        "rules": [{"name": "HasTitle", "values": ["XNS_TestPlace"]}],
+                    }],
+                }]
+            },
+        )
+        assert status == 200
+        assert self.person_handle in handles
+        assert self.person_no_match_handle not in handles
+
+    def test_family_event_place_sub_filter(self):
+        """Families filtered by Event→Place deep sub-filter (Family→Event→Place)."""
+        status, handles = self._query(
+            "/api/families/",
+            {
+                "rules": [{
+                    "namespace": "Event",
+                    "rules": [{
+                        "namespace": "Place",
+                        "rules": [{"name": "HasTitle", "values": ["XNS_TestPlace"]}],
+                    }],
+                }]
+            },
+        )
+        assert status == 200
+        assert self.family_handle in handles
+        assert self.family_no_match_handle not in handles
+
+    def test_unsupported_bridge_returns_400(self):
+        """An unsupported namespace bridge returns 400."""
+        status, _ = self._query(
+            "/api/events/",
+            {"rules": [{"namespace": "Person", "rules": [{"name": "AllPersons"}]}]},
+        )
+        assert status == 400

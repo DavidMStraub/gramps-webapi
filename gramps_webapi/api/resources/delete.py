@@ -7,7 +7,7 @@
 # Copyright (C) 2009       Benny Malengier
 # Copyright (C) 2011       Tim G L Lyons
 # Copyright (C) 2010,2011,2014  Nick Hall
-# Copyright (C) 2021       David Straub
+# Copyright (C) 2021-2025  David Straub
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -30,6 +30,7 @@
 from typing import Any, Callable, Dict, List, Optional
 
 from gramps.gen.db import DbTxn, DbWriteBase
+from gramps.gen.errors import HandleError
 from gramps.gen.utils.db import (
     get_citation_referents,
     get_media_referents,
@@ -38,13 +39,16 @@ from gramps.gen.utils.db import (
 )
 
 from ...const import GRAMPS_OBJECT_PLURAL
-from ..util import get_total_number_of_objects
-from .util import transaction_to_json
+from ..search import get_search_indexer, get_semantic_search_indexer
+from .util import app_has_semantic_search, transaction_to_json
 
 
 def delete_person(db_handle: DbWriteBase, handle: str, trans: DbTxn) -> None:
     """Delete an person and its references."""
-    person = db_handle.get_person_from_handle(handle)
+    try:
+        person = db_handle.get_person_from_handle(handle)
+    except HandleError:
+        return
     db_handle.delete_person_from_database(person, trans)
 
 
@@ -64,12 +68,18 @@ def delete_event(db_handle: DbWriteBase, handle: str, trans: DbTxn) -> None:
     ]
 
     for person_handle in person_list:
-        person = db_handle.get_person_from_handle(person_handle)
+        try:
+            person = db_handle.get_person_from_handle(person_handle)
+        except HandleError:
+            continue
         person.remove_handle_references("Event", ev_handle_list)
         db_handle.commit_person(person, trans)
 
     for family_handle in family_list:
-        family = db_handle.get_family_from_handle(family_handle)
+        try:
+            family = db_handle.get_family_from_handle(family_handle)
+        except HandleError:
+            continue
         family.remove_handle_references("Event", ev_handle_list)
         db_handle.commit_family(family, trans)
 
@@ -88,41 +98,65 @@ def delete_citation(db_handle: DbWriteBase, handle: str, trans: DbTxn) -> None:
         repo_list,
     ) = get_citation_referents(handle, db_handle)
 
-    citation = db_handle.get_citation_from_handle(handle)
+    try:
+        citation = db_handle.get_citation_from_handle(handle)
+    except HandleError:
+        return
     ctn_handle_list = [handle]
 
     for _handle in person_list:
-        person = db_handle.get_person_from_handle(_handle)
+        try:
+            person = db_handle.get_person_from_handle(_handle)
+        except HandleError:
+            continue
         person.remove_citation_references(ctn_handle_list)
         db_handle.commit_person(person, trans)
 
     for _handle in family_list:
-        family = db_handle.get_family_from_handle(_handle)
+        try:
+            family = db_handle.get_family_from_handle(_handle)
+        except HandleError:
+            continue
         family.remove_citation_references(ctn_handle_list)
         db_handle.commit_family(family, trans)
 
     for _handle in event_list:
-        event = db_handle.get_event_from_handle(_handle)
+        try:
+            event = db_handle.get_event_from_handle(_handle)
+        except HandleError:
+            continue
         event.remove_citation_references(ctn_handle_list)
         db_handle.commit_event(event, trans)
 
     for _handle in place_list:
-        place = db_handle.get_place_from_handle(_handle)
+        try:
+            place = db_handle.get_place_from_handle(_handle)
+        except HandleError:
+            continue
         place.remove_citation_references(ctn_handle_list)
         db_handle.commit_place(place, trans)
 
     for _handle in source_list:
-        source = db_handle.get_source_from_handle(_handle)
+        try:
+            source = db_handle.get_source_from_handle(_handle)
+        except HandleError:
+            continue
         source.remove_citation_references(ctn_handle_list)
         db_handle.commit_source(source, trans)
 
     for _handle in media_list:
-        media = db_handle.get_media_from_handle(_handle)
+        try:
+            media = db_handle.get_media_from_handle(_handle)
+        except HandleError:
+            continue
         media.remove_citation_references(ctn_handle_list)
         db_handle.commit_media(media, trans)
 
     for _handle in repo_list:
-        repo = db_handle.get_repository_from_handle(_handle)
+        try:
+            repo = db_handle.get_repository_from_handle(_handle)
+        except HandleError:
+            continue
         repo.remove_citation_references(ctn_handle_list)
         db_handle.commit_repository(repo, trans)
 
@@ -141,7 +175,10 @@ def delete_media(db_handle: DbWriteBase, handle: str, trans: DbTxn) -> None:
     ) = get_media_referents(handle, db_handle)
 
     for _handle in person_list:
-        person = db_handle.get_person_from_handle(_handle)
+        try:
+            person = db_handle.get_person_from_handle(_handle)
+        except HandleError:
+            continue
         new_list = [
             photo
             for photo in person.get_media_list()
@@ -151,7 +188,10 @@ def delete_media(db_handle: DbWriteBase, handle: str, trans: DbTxn) -> None:
         db_handle.commit_person(person, trans)
 
     for _handle in family_list:
-        family = db_handle.get_family_from_handle(_handle)
+        try:
+            family = db_handle.get_family_from_handle(_handle)
+        except HandleError:
+            continue
         new_list = [
             photo
             for photo in family.get_media_list()
@@ -161,7 +201,10 @@ def delete_media(db_handle: DbWriteBase, handle: str, trans: DbTxn) -> None:
         db_handle.commit_family(family, trans)
 
     for _handle in event_list:
-        event = db_handle.get_event_from_handle(_handle)
+        try:
+            event = db_handle.get_event_from_handle(_handle)
+        except HandleError:
+            continue
         new_list = [
             photo
             for photo in event.get_media_list()
@@ -171,7 +214,10 @@ def delete_media(db_handle: DbWriteBase, handle: str, trans: DbTxn) -> None:
         db_handle.commit_event(event, trans)
 
     for _handle in place_list:
-        place = db_handle.get_place_from_handle(_handle)
+        try:
+            place = db_handle.get_place_from_handle(_handle)
+        except HandleError:
+            continue
         new_list = [
             photo
             for photo in place.get_media_list()
@@ -181,7 +227,10 @@ def delete_media(db_handle: DbWriteBase, handle: str, trans: DbTxn) -> None:
         db_handle.commit_place(place, trans)
 
     for _handle in source_list:
-        source = db_handle.get_source_from_handle(_handle)
+        try:
+            source = db_handle.get_source_from_handle(_handle)
+        except HandleError:
+            continue
         new_list = [
             photo
             for photo in source.get_media_list()
@@ -191,7 +240,10 @@ def delete_media(db_handle: DbWriteBase, handle: str, trans: DbTxn) -> None:
         db_handle.commit_source(source, trans)
 
     for _handle in citation_list:
-        citation = db_handle.get_citation_from_handle(_handle)
+        try:
+            citation = db_handle.get_citation_from_handle(_handle)
+        except HandleError:
+            continue
         new_list = [
             photo
             for photo in citation.get_media_list()
@@ -205,7 +257,10 @@ def delete_media(db_handle: DbWriteBase, handle: str, trans: DbTxn) -> None:
 
 def delete_note(db_handle: DbWriteBase, handle: str, trans: DbTxn) -> None:
     """Delete a note and its references."""
-    note = db_handle.get_note_from_handle(handle)
+    try:
+        note = db_handle.get_note_from_handle(handle)
+    except HandleError:
+        return
     (
         person_list,
         family_list,
@@ -220,49 +275,73 @@ def delete_note(db_handle: DbWriteBase, handle: str, trans: DbTxn) -> None:
     note_handle = note.get_handle()
 
     for _handle in person_list:
-        person = db_handle.get_person_from_handle(_handle)
+        try:
+            person = db_handle.get_person_from_handle(_handle)
+        except HandleError:
+            continue
         if person:
             person.remove_note(note_handle)
             db_handle.commit_person(person, trans)
 
     for _handle in family_list:
-        family = db_handle.get_family_from_handle(_handle)
+        try:
+            family = db_handle.get_family_from_handle(_handle)
+        except HandleError:
+            continue
         if family:
             family.remove_note(note_handle)
             db_handle.commit_family(family, trans)
 
     for _handle in event_list:
-        event = db_handle.get_event_from_handle(_handle)
+        try:
+            event = db_handle.get_event_from_handle(_handle)
+        except HandleError:
+            continue
         if event:
             event.remove_note(note_handle)
             db_handle.commit_event(event, trans)
 
     for _handle in place_list:
-        place = db_handle.get_place_from_handle(_handle)
+        try:
+            place = db_handle.get_place_from_handle(_handle)
+        except HandleError:
+            continue
         if place:
             place.remove_note(note_handle)
             db_handle.commit_place(place, trans)
 
     for _handle in source_list:
-        source = db_handle.get_source_from_handle(_handle)
+        try:
+            source = db_handle.get_source_from_handle(_handle)
+        except HandleError:
+            continue
         if source:
             source.remove_note(note_handle)
             db_handle.commit_source(source, trans)
 
     for _handle in citation_list:
-        citation = db_handle.get_citation_from_handle(_handle)
+        try:
+            citation = db_handle.get_citation_from_handle(_handle)
+        except HandleError:
+            continue
         if citation:
             citation.remove_note(note_handle)
             db_handle.commit_citation(citation, trans)
 
     for _handle in media_list:
-        media = db_handle.get_media_from_handle(_handle)
+        try:
+            media = db_handle.get_media_from_handle(_handle)
+        except HandleError:
+            continue
         if media:
             media.remove_note(note_handle)
             db_handle.commit_media(media, trans)
 
     for _handle in repo_list:
-        repo = db_handle.get_repository_from_handle(_handle)
+        try:
+            repo = db_handle.get_repository_from_handle(_handle)
+        except HandleError:
+            continue
         if repo:
             repo.remove_note(note_handle)
             db_handle.commit_repository(repo, trans)
@@ -285,17 +364,26 @@ def delete_place(db_handle: DbWriteBase, handle: str, trans: DbTxn) -> None:
     ]
 
     for _handle in person_list:
-        person = db_handle.get_person_from_handle(_handle)
+        try:
+            person = db_handle.get_person_from_handle(_handle)
+        except HandleError:
+            continue
         person.remove_handle_references("Place", handle)
         db_handle.commit_person(person, trans)
 
     for _handle in family_list:
-        family = db_handle.get_family_from_handle(_handle)
+        try:
+            family = db_handle.get_family_from_handle(_handle)
+        except HandleError:
+            continue
         family.remove_handle_references("Place", handle)
         db_handle.commit_family(family, trans)
 
     for _handle in event_list:
-        event = db_handle.get_event_from_handle(_handle)
+        try:
+            event = db_handle.get_event_from_handle(_handle)
+        except HandleError:
+            continue
         event.remove_handle_references("Place", handle)
         db_handle.commit_event(event, trans)
 
@@ -311,7 +399,10 @@ def delete_repository(db_handle: DbWriteBase, handle: str, trans: DbTxn) -> None
     repos_handle_list = [handle]
 
     for _handle in souce_list:
-        source = db_handle.get_source_from_handle(_handle)
+        try:
+            source = db_handle.get_source_from_handle(_handle)
+        except HandleError:
+            continue
         source.remove_repo_references(repos_handle_list)
         db_handle.commit_source(source, trans)
 
@@ -326,7 +417,7 @@ def delete_source(db_handle: DbWriteBase, handle: str, trans: DbTxn) -> None:
     # Citation. Then we remove the Citations. (We don't need to
     # remove the source_handle references to the Source, because we are
     # removing the whole Citation). Then we can remove the Source
-    (citation_list, citation_referents_list) = get_source_and_citation_referents(
+    citation_list, citation_referents_list = get_source_and_citation_referents(
         handle, db_handle
     )
 
@@ -349,37 +440,58 @@ def delete_source(db_handle: DbWriteBase, handle: str, trans: DbTxn) -> None:
         ctn_handle_list = [citation_handle]
 
         for _handle in person_list:
-            person = db_handle.get_person_from_handle(_handle)
+            try:
+                person = db_handle.get_person_from_handle(_handle)
+            except HandleError:
+                continue
             person.remove_citation_references(ctn_handle_list)
             db_handle.commit_person(person, trans)
 
         for _handle in family_list:
-            family = db_handle.get_family_from_handle(_handle)
+            try:
+                family = db_handle.get_family_from_handle(_handle)
+            except HandleError:
+                continue
             family.remove_citation_references(ctn_handle_list)
             db_handle.commit_family(family, trans)
 
         for _handle in event_list:
-            event = db_handle.get_event_from_handle(_handle)
+            try:
+                event = db_handle.get_event_from_handle(_handle)
+            except HandleError:
+                continue
             event.remove_citation_references(ctn_handle_list)
             db_handle.commit_event(event, trans)
 
         for _handle in place_list:
-            place = db_handle.get_place_from_handle(_handle)
+            try:
+                place = db_handle.get_place_from_handle(_handle)
+            except HandleError:
+                continue
             place.remove_citation_references(ctn_handle_list)
             db_handle.commit_place(place, trans)
 
         for _handle in source_list:
-            source = db_handle.get_source_from_handle(_handle)
+            try:
+                source = db_handle.get_source_from_handle(_handle)
+            except HandleError:
+                continue
             source.remove_citation_references(ctn_handle_list)
             db_handle.commit_source(source, trans)
 
         for _handle in media_list:
-            media = db_handle.get_media_from_handle(_handle)
+            try:
+                media = db_handle.get_media_from_handle(_handle)
+            except HandleError:
+                continue
             media.remove_citation_references(ctn_handle_list)
             db_handle.commit_media(media, trans)
 
         for _handle in repo_list:
-            repo = db_handle.get_repository_from_handle(_handle)
+            try:
+                repo = db_handle.get_repository_from_handle(_handle)
+            except HandleError:
+                continue
             repo.remove_citation_references(ctn_handle_list)
             db_handle.commit_repository(repo, trans)
 
@@ -408,7 +520,10 @@ def delete_tag(db_handle: DbWriteBase, handle: str, trans: DbTxn) -> None:
     links = db_handle.find_backlink_handles(handle)
 
     for classname, _handle in links:
-        obj = fnc[classname][0](_handle)  # get from handle
+        try:
+            obj = fnc[classname][0](_handle)  # get from handle
+        except HandleError:
+            continue
         obj.remove_tag(handle)
         fnc[classname][1](obj, trans)  # commit
     db_handle.remove_tag(handle, trans)
@@ -427,6 +542,24 @@ delete_methods = {
     "tag": delete_tag,
 }
 
+# Deletion order for the fast (batch) path: leaf objects first so the reference
+# table is cleaned up in a dependency-friendly order.
+_FAST_DELETE_ORDER = [
+    "Tag",
+    "Note",
+    "Media",
+    "Citation",
+    "Repository",
+    "Source",
+    "Event",
+    "Place",
+    "Family",
+    "Person",
+]
+
+if set(_FAST_DELETE_ORDER) != set(GRAMPS_OBJECT_PLURAL):
+    raise RuntimeError("_FAST_DELETE_ORDER is out of sync with GRAMPS_OBJECT_PLURAL")
+
 
 def delete_object(
     db_handle: DbWriteBase, handle: str, gramps_class_name: str
@@ -437,8 +570,78 @@ def delete_object(
         method = delete_methods[key]
     except KeyError:
         raise NotImplementedError(gramps_class_name)
+    unset_default_person = (
+        gramps_class_name == "Person" and handle == db_handle.get_default_handle()
+    )
     with DbTxn(f"Delete {gramps_class_name}", db_handle) as trans:
         method(db_handle, handle, trans=trans)
+        if unset_default_person:
+            db_handle.set_default_person_handle(None)
+        trans_dict = transaction_to_json(trans)
+    return trans_dict
+
+
+def remove_deleted_from_search_indices(
+    tree: str, trans_dict: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Remove deleted objects from the search indices.
+
+    Deletions are cheap and applied right away. The remaining (non-delete)
+    transaction records are returned so the caller can schedule them for
+    (re-)indexing in the background, since that requires (re-)computing
+    embeddings for semantic search.
+    """
+    indexer = get_search_indexer(tree)
+    indexer_semantic = (
+        get_semantic_search_indexer(tree) if app_has_semantic_search() else None
+    )
+    # An object can appear more than once in the same transaction (e.g. a
+    # self-referencing object being both updated to remove the self-reference
+    # and then deleted). Its final state - deleted - takes precedence, so we
+    # must never schedule it for re-indexing.
+    deleted = {
+        (item["handle"], item["_class"])
+        for item in trans_dict
+        if item["type"] == "delete"
+    }
+    trans_dict_to_reindex = []
+    for item in trans_dict:
+        key = (item["handle"], item["_class"])
+        if item["type"] == "delete":
+            indexer.delete_object(handle=item["handle"], class_name=item["_class"])
+            if indexer_semantic is not None:
+                indexer_semantic.delete_object(
+                    handle=item["handle"], class_name=item["_class"]
+                )
+        elif key not in deleted:
+            trans_dict_to_reindex.append(item)
+    return trans_dict_to_reindex
+
+
+_NAMESPACE_TO_CLASS_NAME = {
+    plural: name for name, plural in GRAMPS_OBJECT_PLURAL.items()
+}
+
+
+def delete_objects_by_handle(
+    db_handle: DbWriteBase,
+    namespace: str,
+    handles: List[str],
+) -> List[Dict[str, Any]]:
+    """Delete specific objects of a single type, given by namespace, by handle."""
+    try:
+        class_name = _NAMESPACE_TO_CLASS_NAME[namespace]
+    except KeyError:
+        raise ValueError(f"Unknown namespace {namespace}")
+    del_method = delete_methods[class_name.lower()]
+    unset_default_person = (
+        class_name == "Person" and db_handle.get_default_handle() in handles
+    )
+    with DbTxn(f"Delete {namespace}", db_handle) as trans:
+        if unset_default_person:
+            db_handle.set_default_person_handle(None)
+        for handle in handles:
+            del_method(db_handle=db_handle, handle=handle, trans=trans)
         trans_dict = transaction_to_json(trans)
     return trans_dict
 
@@ -449,18 +652,50 @@ def delete_all_objects(
     progress_cb: Optional[Callable] = None,
 ) -> None:
     """Delete all objects, optionally restricting to one or more types (namespaces)."""
-    if progress_cb:
-        total = get_total_number_of_objects(db_handle)
     if namespaces is not None:
         unknown_namespaces = set(namespaces) - set(GRAMPS_OBJECT_PLURAL.values())
         if unknown_namespaces:
             raise ValueError(f"Unknown namespace {unknown_namespaces}")
+    total = 0
+    if progress_cb:
+        total = sum(
+            getattr(db_handle, f"get_number_of_{namespace}")()
+            for _, namespace in GRAMPS_OBJECT_PLURAL.items()
+            if namespaces is None or namespace in namespaces
+        )
     i = 0
-    for class_name, namespace in GRAMPS_OBJECT_PLURAL.items():
-        if namespaces is None or namespace in namespaces:
-            with DbTxn(f"Delete {namespaces or 'all objects'}", db_handle) as trans:
-                iter_handles = db_handle.method("iter_%s_handles", class_name)
-                del_method = delete_methods[class_name.lower()]
+    delete_all = namespaces is None
+    order = _FAST_DELETE_ORDER if delete_all else list(GRAMPS_OBJECT_PLURAL.keys())
+    for class_name in order:
+        namespace = GRAMPS_OBJECT_PLURAL[class_name]
+        if namespaces is not None and namespace not in namespaces:
+            continue
+        iter_handles = db_handle.method("iter_%s_handles", class_name)
+        if delete_all:
+            # Fast path: batch=True skips undo-data recording and signal emission.
+            # Materialize handles before opening the transaction to avoid cursor
+            # conflicts with the deletions that follow.
+            handles = list(iter_handles())
+            unset_default_person = (
+                class_name == "Person" and db_handle.get_default_handle() is not None
+            )
+            remove = getattr(db_handle, f"remove_{class_name.lower()}")
+            with DbTxn(f"Delete {class_name}", db_handle, batch=True) as trans:
+                if unset_default_person:
+                    db_handle.set_default_person_handle(None)
+                for handle in handles:
+                    if progress_cb:
+                        progress_cb(current=i, total=total)
+                    i += 1
+                    remove(handle, trans)
+        else:
+            del_method = delete_methods[class_name.lower()]
+            unset_default_person = (
+                class_name == "Person" and db_handle.get_default_handle() is not None
+            )
+            with DbTxn(f"Delete {namespaces}", db_handle) as trans:
+                if unset_default_person:
+                    db_handle.set_default_person_handle(None)
                 for handle in iter_handles():
                     if progress_cb:
                         progress_cb(current=i, total=total)

@@ -23,11 +23,22 @@ import datetime
 from pathlib import Path
 from typing import Dict
 
+from PIL.Image import MAX_IMAGE_PIXELS
+
+from ._version import __version__
+
 
 class DefaultConfig(object):
     """Default configuration object."""
 
     PROPAGATE_EXCEPTIONS = True
+    API_TITLE = "Gramps Web API"
+    API_VERSION = __version__
+    OPENAPI_VERSION = "3.0.3"
+    OPENAPI_URL_PREFIX = "/"
+    OPENAPI_JSON_PATH = "api/openapi.json"
+    OPENAPI_SWAGGER_UI_PATH = "/api/swagger-ui"
+    OPENAPI_SWAGGER_UI_URL = "https://cdn.jsdelivr.net/npm/swagger-ui-dist/"
     SEARCH_INDEX_DIR = "indexdir"  # deprecated!
     SEARCH_INDEX_DB_URI = ""
     EMAIL_HOST = "localhost"
@@ -35,6 +46,8 @@ class DefaultConfig(object):
     EMAIL_HOST_USER = ""
     EMAIL_HOST_PASSWORD = ""
     EMAIL_USE_TLS = True
+    EMAIL_USE_SSL = None
+    EMAIL_USE_STARTTLS = None
     DEFAULT_FROM_EMAIL = ""
     BASE_URL = "http://localhost/"
     CORS_EXPOSE_HEADERS = ["X-Total-Count"]
@@ -51,11 +64,18 @@ class DefaultConfig(object):
         "CACHE_THRESHOLD": 1000,
         "CACHE_DEFAULT_TIMEOUT": 0,
     }
+    PERSISTENT_CACHE_CONFIG = {
+        "CACHE_TYPE": "FileSystemCache",
+        "CACHE_DIR": str(Path.cwd() / "persistent_cache"),
+        "CACHE_THRESHOLD": 0,
+        "CACHE_DEFAULT_TIMEOUT": 0,
+    }
     POSTGRES_USER = None
     POSTGRES_PASSWORD = None
     POSTGRES_HOST = "localhost"
     POSTGRES_PORT = "5432"
     IGNORE_DB_LOCK = False
+    TREE_ID = ""
     CELERY_CONFIG: Dict[str, str] = {}
     MEDIA_BASE_DIR = ""
     MEDIA_PREFIX_TREE = False
@@ -68,7 +88,26 @@ class DefaultConfig(object):
     LLM_BASE_URL = None
     LLM_MODEL = ""
     LLM_MAX_CONTEXT_LENGTH = 50000
-    VECTOR_EMBEDDING_MODEL = ""
+    LLM_MAX_REQUESTS = 15
+    LLM_MAX_TOKENS = 200_000
+    LLM_SYSTEM_PROMPT = None
+    VECTOR_EMBEDDING_MODEL = ""  # Model name for semantic search embeddings
+    # If set, use remote OpenAI-compatible API instead of local model
+    VECTOR_EMBEDDING_BASE_URL = None
+    # Optional API key for authenticated embedding providers
+    VECTOR_EMBEDDING_API_KEY = None
+    DISABLE_TELEMETRY = False
+    OIDC_ISSUER = ""
+    OIDC_CLIENT_ID = ""
+    OIDC_CLIENT_SECRET = ""
+    OIDC_REDIRECT_URI = ""
+    OIDC_ENABLED = False
+    OIDC_DISABLE_LOCAL_AUTH = False
+    OIDC_AUTO_REDIRECT = False
+    OIDC_USERNAME_CLAIM = "preferred_username"
+    OIDC_NAME = "OIDC"
+    PILLOW_MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+    MAX_THUMBNAIL_FILE_BYTES = 50 * 1024 * 1024  # 50 MB
 
 
 class DefaultConfigJWT(object):

@@ -30,9 +30,9 @@ from gramps.gen.dbstate import DbState
 
 from gramps_webapi.__main__ import cli
 from gramps_webapi.app import create_app
+from gramps_webapi.auth import get_user_details
 from gramps_webapi.const import ENV_CONFIG_FILE
 from gramps_webapi.dbmanager import WebDbManager
-from gramps_webapi.auth import get_user_details
 
 
 class TestCLI(unittest.TestCase):
@@ -50,7 +50,7 @@ USER_DB_URI="sqlite:///{cls.user_db.name}"
         with open(cls.config_file.name, "w") as f:
             f.write(config)
         with patch.dict("os.environ", {ENV_CONFIG_FILE: cls.config_file.name}):
-            cls.app = create_app()
+            cls.app = create_app(config_from_env=False)
         cls.app.config["TESTING"] = True
         cls.client = cls.app.test_client()
         cls.runner = CliRunner()
@@ -154,6 +154,10 @@ USER_DB_URI="sqlite:///{cls.user_db.name}"
             ],
         )
         assert result.exit_code == 0
+        # The log messages go to the logger, not stdout, so we can't check for them in result.output
+        # But we can ensure there's no error output and the command succeeded
+        assert "Error" not in result.output
+        assert "Exception" not in result.output
 
     def test_search_reindex_full(self):
         tree = WebDbManager(name=self.name).dirname
@@ -169,6 +173,10 @@ USER_DB_URI="sqlite:///{cls.user_db.name}"
             ],
         )
         assert result.exit_code == 0
+        # The log messages go to the logger, not stdout, so we can't check for them in result.output
+        # But we can ensure there's no error output and the command succeeded
+        assert "Error" not in result.output
+        assert "Exception" not in result.output
 
     def test_search_reindex_incremental_notree(self):
         tree = WebDbManager(name=self.name).dirname
@@ -182,6 +190,10 @@ USER_DB_URI="sqlite:///{cls.user_db.name}"
             ],
         )
         assert result.exit_code == 0
+        # The log messages go to the logger, not stdout, so we can't check for them in result.output
+        # But we can ensure there's no error output and the command succeeded
+        assert "Error" not in result.output
+        assert "Exception" not in result.output
 
     def test_search_reindex_full_notree(self):
         tree = WebDbManager(name=self.name).dirname
@@ -195,3 +207,34 @@ USER_DB_URI="sqlite:///{cls.user_db.name}"
             ],
         )
         assert result.exit_code == 0
+        # The log messages go to the logger, not stdout, so we can't check for them in result.output
+        # But we can ensure there's no error output and the command succeeded
+        assert "Error" not in result.output
+        assert "Exception" not in result.output
+
+    def test_search_reindex_with_broken_progress_callback(self):
+        """Test that would catch the original bug where progress_callback_count was undefined."""
+        tree = WebDbManager(name=self.name).dirname
+
+        # Temporarily break the progress callback by patching it to raise an error
+        with patch(
+            "gramps_webapi.__main__.progress_callback_count_factory"
+        ) as mock_factory:
+            mock_factory.side_effect = NameError(
+                "name 'progress_callback_count' is not defined"
+            )
+
+            result = self.runner.invoke(
+                cli,
+                [
+                    "--config",
+                    self.config_file.name,
+                    "search",
+                    "--tree",
+                    tree,
+                    "index-full",
+                ],
+            )
+            # With the improved error handling, this should now fail with a non-zero exit code
+            assert result.exit_code != 0
+            assert "Indexing failed" in result.output

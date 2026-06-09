@@ -60,7 +60,7 @@ class TestObjectDeletion(unittest.TestCase):
         dirpath, _name = cls.dbman.create_new_db_cli(cls.name, dbid="sqlite")
         tree = os.path.basename(dirpath)
         with patch.dict("os.environ", {ENV_CONFIG_FILE: TEST_AUTH_CONFIG}):
-            cls.app = create_app()
+            cls.app = create_app(config_from_env=False)
         cls.app.config["TESTING"] = True
         cls.client = cls.app.test_client()
         with cls.app.app_context():
@@ -227,6 +227,99 @@ class TestObjectDeletion(unittest.TestCase):
         self.assertEqual(len(rv.json), 0)
 
 
+class TestDefaultPersonDeletion(unittest.TestCase):
+    """Test that deleting the default/home person clears the default handle."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.name = "Test Default Person"
+        cls.dbman = CLIDbManager(DbState())
+        dirpath, _name = cls.dbman.create_new_db_cli(cls.name, dbid="sqlite")
+        cls.tree = os.path.basename(dirpath)
+        with patch.dict("os.environ", {ENV_CONFIG_FILE: TEST_AUTH_CONFIG}):
+            cls.app = create_app(config_from_env=False)
+        cls.app.config["TESTING"] = True
+        cls.client = cls.app.test_client()
+        with cls.app.app_context():
+            user_db.create_all()
+            add_user(name="owner_dp", password="123", role=ROLE_OWNER, tree=cls.tree)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.dbman.remove_database(cls.name)
+
+    def _headers(self):
+        return get_headers(self.client, "owner_dp", "123")
+
+    def _set_default_person(self, handle: str) -> None:
+        """Set the default person via the db directly."""
+        from gramps_webapi.dbmanager import WebDbManager
+
+        dbmgr = WebDbManager(name=self.name, create_if_missing=False)
+        dbstate = dbmgr.get_db(force_unlock=True)
+        dbstate.db.set_default_person_handle(handle)
+        dbstate.db.close()
+
+    def test_delete_default_person_via_endpoint(self):
+        """DELETE /api/people/<handle> on the default person clears default_person."""
+        headers = self._headers()
+        handle = make_handle()
+        rv = self.client.post(
+            "/api/people/",
+            json={"_class": "Person", "handle": handle},
+            headers=headers,
+        )
+        self.assertEqual(rv.status_code, 201)
+        self._set_default_person(handle)
+        # verify metadata shows it as default
+        rv = self.client.get("/api/metadata/", headers=headers)
+        self.assertEqual(rv.json["default_person"], handle)
+        # delete the default person
+        rv = self.client.delete(f"/api/people/{handle}", headers=headers)
+        self.assertEqual(rv.status_code, 200)
+        # default_person must now be null
+        rv = self.client.get("/api/metadata/", headers=headers)
+        self.assertIsNone(rv.json["default_person"])
+
+    def test_delete_all_people_clears_default_person(self):
+        """POST /api/objects/delete/?namespaces=people clears default_person."""
+        headers = self._headers()
+        handle = make_handle()
+        rv = self.client.post(
+            "/api/people/",
+            json={"_class": "Person", "handle": handle},
+            headers=headers,
+        )
+        self.assertEqual(rv.status_code, 201)
+        self._set_default_person(handle)
+        rv = self.client.get("/api/metadata/", headers=headers)
+        self.assertEqual(rv.json["default_person"], handle)
+        # delete all people
+        rv = self.client.post("/api/objects/delete/?namespaces=people", headers=headers)
+        self.assertEqual(rv.status_code, 200)
+        rv = self.client.get("/api/metadata/", headers=headers)
+        self.assertIsNone(rv.json["default_person"])
+
+    def test_delete_all_objects_clears_default_person(self):
+        """POST /api/objects/delete/ (all) clears default_person."""
+        headers = self._headers()
+        handle = make_handle()
+        rv = self.client.post(
+            "/api/people/",
+            json={"_class": "Person", "handle": handle},
+            headers=headers,
+        )
+        self.assertEqual(rv.status_code, 201)
+        self._set_default_person(handle)
+        rv = self.client.get("/api/metadata/", headers=headers)
+        self.assertEqual(rv.json["default_person"], handle)
+        # delete everything
+        rv = self.client.post("/api/objects/delete/", headers=headers)
+        self.assertEqual(rv.status_code, 200)
+        rv = self.client.get("/api/metadata/", headers=headers)
+        self.assertIsNone(rv.json["default_person"])
+
+
 class TestDeleteAllObjects(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -235,7 +328,7 @@ class TestDeleteAllObjects(unittest.TestCase):
         dirpath, _name = cls.dbman.create_new_db_cli(cls.name, dbid="sqlite")
         tree = os.path.basename(dirpath)
         with patch.dict("os.environ", {ENV_CONFIG_FILE: TEST_AUTH_CONFIG}):
-            cls.app = create_app()
+            cls.app = create_app(config_from_env=False)
         cls.app.config["TESTING"] = True
         cls.client = cls.app.test_client()
         with cls.app.app_context():
@@ -378,3 +471,122 @@ class TestDeleteAllObjects(unittest.TestCase):
         rv = self.client.post("/api/objects/delete/", headers=headers)
         assert rv.status_code == 401
         assert rv.json == {"message": "Fresh token required"}
+
+
+class TestDeleteObjectsByHandle(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.name = "Test Delete By Handle"
+        cls.dbman = CLIDbManager(DbState())
+        dirpath, _name = cls.dbman.create_new_db_cli(cls.name, dbid="sqlite")
+        tree = os.path.basename(dirpath)
+        with patch.dict("os.environ", {ENV_CONFIG_FILE: TEST_AUTH_CONFIG}):
+            cls.app = create_app(config_from_env=False)
+        cls.app.config["TESTING"] = True
+        cls.client = cls.app.test_client()
+        with cls.app.app_context():
+            user_db.create_all()
+            add_user(
+                name="contributor_dbh", password="123", role=ROLE_CONTRIBUTOR, tree=tree
+            )
+            add_user(name="editor_dbh", password="123", role=ROLE_EDITOR, tree=tree)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.dbman.remove_database(cls.name)
+
+    def test_delete_by_handle_permissions(self):
+        headers_editor = get_headers(self.client, "editor_dbh", "123")
+        headers_contributor = get_headers(self.client, "contributor_dbh", "123")
+        rv = self.client.post("/api/notes/", json={}, headers=headers_editor)
+        handle = rv.json[0]["handle"]
+        # contributor lacks PERM_DEL_OBJ
+        rv = self.client.post(
+            "/api/objects/delete-by-handle/",
+            json={"namespace": "notes", "handles": [handle]},
+            headers=headers_contributor,
+        )
+        assert rv.status_code == 403
+        # editor is allowed, and no fresh token is required
+        rv = self.client.post(
+            "/api/objects/delete-by-handle/",
+            json={"namespace": "notes", "handles": [handle]},
+            headers=headers_editor,
+        )
+        # synchronous response: the transaction is returned directly, not a task reference
+        assert rv.status_code == 200
+        assert rv.headers.pop("X-Total-Count") == "1"
+        out = rv.json
+        assert len(out) == 1
+        assert out[0]["_class"] == "Note"
+        assert out[0]["handle"] == handle
+        assert out[0]["type"] == "delete"
+        rv = self.client.get(f"/api/notes/{handle}", headers=headers_editor)
+        assert rv.status_code == 404
+
+    def test_delete_by_handle_updates_search_index(self):
+        """Deleting by handle must remove the object from the search index."""
+        headers = get_headers(self.client, "editor_dbh", "123")
+        gramps_id = make_handle().replace("-", "")
+        rv = self.client.post(
+            "/api/notes/",
+            json={"_class": "Note", "gramps_id": gramps_id},
+            headers=headers,
+        )
+        handle = rv.json[0]["handle"]
+        rv = self.client.get(f"/api/search/?query={gramps_id}", headers=headers)
+        assert len(rv.json) == 1
+        rv = self.client.post(
+            "/api/objects/delete-by-handle/",
+            json={"namespace": "notes", "handles": [handle]},
+            headers=headers,
+        )
+        assert rv.status_code == 200
+        rv = self.client.get(f"/api/search/?query={gramps_id}", headers=headers)
+        assert len(rv.json) == 0
+
+    def test_delete_by_handle_args(self):
+        headers = get_headers(self.client, "editor_dbh", "123")
+        handle = make_handle()
+        # missing namespace -> 422
+        rv = self.client.post(
+            "/api/objects/delete-by-handle/",
+            json={"handles": [handle]},
+            headers=headers,
+        )
+        assert rv.status_code == 422
+        # missing handles -> 422
+        rv = self.client.post(
+            "/api/objects/delete-by-handle/",
+            json={"namespace": "notes"},
+            headers=headers,
+        )
+        assert rv.status_code == 422
+        # unknown namespace -> 422
+        rv = self.client.post(
+            "/api/objects/delete-by-handle/",
+            json={"namespace": "cars", "handles": [handle]},
+            headers=headers,
+        )
+        assert rv.status_code == 422
+
+    def test_delete_by_handle_selective(self):
+        headers = get_headers(self.client, "editor_dbh", "123")
+        handles = []
+        for _ in range(3):
+            rv = self.client.post("/api/notes/", json={}, headers=headers)
+            handles.append(rv.json[0]["handle"])
+        for _ in range(3):
+            self.client.post("/api/people/", json={}, headers=headers)
+        rv = self.client.post(
+            "/api/objects/delete-by-handle/",
+            json={"namespace": "notes", "handles": handles[:2]},
+            headers=headers,
+        )
+        assert rv.status_code == 200
+        rv = self.client.get("/api/notes/", headers=headers)
+        assert rv.headers.pop("X-Total-Count") == "1"
+        assert rv.json[0]["handle"] == handles[2]
+        # other namespace untouched
+        rv = self.client.get("/api/people/", headers=headers)
+        assert rv.headers.pop("X-Total-Count") == "3"

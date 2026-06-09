@@ -30,6 +30,7 @@ from typing import Optional
 
 TEST_GRAMPSHOME = tempfile.mkdtemp()
 os.environ["GRAMPSHOME"] = TEST_GRAMPSHOME
+os.environ["GRAMPS_DATABASE_PATH"] = os.path.join(TEST_GRAMPSHOME, "gramps", "grampsdb")
 
 from gramps.cli.clidbman import CLIDbManager
 from gramps.cli.grampscli import CLIManager
@@ -129,3 +130,9 @@ class ExampleDbSQLite(ExampleDbBase, WebDbManager):
         if name != import_name:
             dbman.rename_database(os.path.join(self.path, "name.txt"), self.name)
         WebDbManager.__init__(self, self.name)
+
+
+def tearDownModule():
+    """Test module tear down."""
+    if TEST_GRAMPSHOME and os.path.isdir(TEST_GRAMPSHOME):
+        shutil.rmtree(TEST_GRAMPSHOME)

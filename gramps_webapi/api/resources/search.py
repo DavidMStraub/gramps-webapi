@@ -30,11 +30,13 @@ from gramps.gen.db.base import DbReadBase
 from gramps.gen.errors import HandleError
 from gramps.gen.lib.primaryobj import BasicPrimaryObject as GrampsObject
 from gramps.gen.utils.grampslocale import GrampsLocale
+from marshmallow import Schema
 from webargs import fields, validate
 
 from ...auth.const import PERM_TRIGGER_REINDEX, PERM_VIEW_PRIVATE
 from ...const import PRIMARY_GRAMPS_OBJECTS
 from ..auth import has_permissions, require_permissions
+from ..blueprint import api_blueprint
 from ..search import (
     SearchIndexer,
     SemanticSearchIndexer,
@@ -46,16 +48,18 @@ from ..tasks import (
     make_task_response,
     run_task,
     search_reindex_full,
+    search_reindex_full_semantic,
     search_reindex_incremental,
+    search_reindex_incremental_semantic,
 )
 from ..util import (
     get_db_handle,
     get_locale_for_language,
     get_tree_from_jwt_or_fail,
-    use_args,
 )
 from . import ProtectedResource
 from .emit import GrampsJSONEncoder
+from .schemas import SearchResultSchema
 from .util import (
     abort_with_message,
     get_citation_profile_for_object,
@@ -65,6 +69,84 @@ from .util import (
     get_person_profile_for_object,
     get_place_profile_for_object,
 )
+
+
+class SearchQueryArgs(Schema):
+    """Query arguments for GET /search/."""
+
+    locale = fields.Str(
+        load_default=None,
+        validate=validate.Length(min=1, max=5),
+        metadata={
+            "description": "Language code of the locale to use where applicable. Must be a valid code from the available translations."
+        },
+    )
+    query = fields.Str(
+        required=True,
+        validate=validate.Length(min=1),
+        metadata={"description": "The search string."},
+    )
+    semantic = fields.Boolean(
+        load_default=False,
+        metadata={
+            "description": "If true, use semantic (vector) search rather than full-text search."
+        },
+    )
+    page = fields.Int(
+        load_default=1,
+        validate=validate.Range(min=1),
+        metadata={"description": "Page number of the result subset to return."},
+    )
+    pagesize = fields.Int(
+        load_default=20,
+        validate=validate.Range(min=1),
+        metadata={"description": "Number of search results per page."},
+    )
+    sort = fields.DelimitedList(
+        fields.Str(validate=validate.Length(min=1)),
+        metadata={
+            "description": "Comma-delimited sort keys for search results. Available: change, type. Prefix with '-' for descending."
+        },
+    )
+    precision = fields.Integer(
+        load_default=3,
+        validate=validate.Range(min=1, max=3),
+        metadata={
+            "description": "Number of significant time components in age/span"
+            " strings when profile is used: 1=year only, 2=year+month,"
+            " 3=year+month+day."
+        },
+    )
+    profile = fields.DelimitedList(
+        fields.Str(validate=validate.Length(min=1)),
+        validate=validate.ContainsOnly(
+            choices=["all", "self", "families", "events", "age", "span"]
+        ),
+        metadata={
+            "description": "Comma-delimited profile sections to include for matching objects. Possible values: all, age, self, span, events, families, references."
+        },
+    )
+    strip = fields.Boolean(
+        load_default=False,
+        metadata={
+            "description": "If true, strip keys with empty values from the response."
+        },
+    )
+    type = fields.DelimitedList(
+        fields.Str(validate=validate.Length(min=1)),
+        validate=validate.ContainsOnly(
+            choices=[t.lower() for t in PRIMARY_GRAMPS_OBJECTS]
+        ),
+        metadata={
+            "description": "Comma-delimited list of object types to include (e.g. 'person,family,source')."
+        },
+    )
+    change = fields.Str(
+        validate=validate.Length(min=2),
+        metadata={
+            "description": "ISO-8601 timestamp filter (prefix with '>' or '<') to filter by last-change date."
+        },
+    )
 
 
 class SearchResource(GrampsJSONEncoder, ProtectedResource):
@@ -87,15 +169,30 @@ class SearchResource(GrampsJSONEncoder, ProtectedResource):
         if "profile" in args:
             if class_name == "person":
                 obj.profile = get_person_profile_for_object(
-                    self.db_handle, obj, args["profile"], locale=locale
+                    self.db_handle,
+                    obj,
+                    args["profile"],
+                    locale=locale,
+                    name_format=args.get("name_format"),
+                    precision=args.get("precision", 3),
                 )
             elif class_name == "family":
                 obj.profile = get_family_profile_for_object(
-                    self.db_handle, obj, args["profile"], locale=locale
+                    self.db_handle,
+                    obj,
+                    args["profile"],
+                    locale=locale,
+                    name_format=args.get("name_format"),
+                    precision=args.get("precision", 3),
                 )
             elif class_name == "event":
                 obj.profile = get_event_profile_for_object(
-                    self.db_handle, obj, args["profile"], locale=locale
+                    self.db_handle,
+                    obj,
+                    args["profile"],
+                    locale=locale,
+                    name_format=args.get("name_format"),
+                    precision=args.get("precision", 3),
                 )
             elif class_name == "citation":
                 obj.profile = get_citation_profile_for_object(
@@ -112,33 +209,8 @@ class SearchResource(GrampsJSONEncoder, ProtectedResource):
 
         return obj
 
-    @use_args(
-        {
-            "locale": fields.Str(
-                load_default=None, validate=validate.Length(min=1, max=5)
-            ),
-            "query": fields.Str(required=True, validate=validate.Length(min=1)),
-            "semantic": fields.Boolean(load_default=False),
-            "page": fields.Int(load_default=1, validate=validate.Range(min=1)),
-            "pagesize": fields.Int(load_default=20, validate=validate.Range(min=1)),
-            "sort": fields.DelimitedList(fields.Str(validate=validate.Length(min=1))),
-            "profile": fields.DelimitedList(
-                fields.Str(validate=validate.Length(min=1)),
-                validate=validate.ContainsOnly(
-                    choices=["all", "self", "families", "events", "age", "span"]
-                ),
-            ),
-            "strip": fields.Boolean(load_default=False),
-            "type": fields.DelimitedList(
-                fields.Str(validate=validate.Length(min=1)),
-                validate=validate.ContainsOnly(
-                    choices=[t.lower() for t in PRIMARY_GRAMPS_OBJECTS]
-                ),
-            ),
-            "change": fields.Str(validate=validate.Length(min=2)),
-        },
-        location="query",
-    )
+    @api_blueprint.response(200, SearchResultSchema(many=True))
+    @api_blueprint.arguments(SearchQueryArgs, location="query")
     def get(self, args: Dict):
         """Get search result."""
         tree = get_tree_from_jwt_or_fail()
@@ -149,8 +221,8 @@ class SearchResource(GrampsJSONEncoder, ProtectedResource):
                 )
             else:
                 searcher = get_search_indexer(tree)
-        except ValueError:
-            abort_with_message(500, "Failed initializing search")
+        except ValueError as exc:
+            abort_with_message(503, str(exc))
         if args["semantic"] and args.get("sort"):
             abort_with_message(
                 422, "the sort parameter is not allowed with semantic search"
@@ -194,28 +266,45 @@ class SearchResource(GrampsJSONEncoder, ProtectedResource):
         return self.response(200, payload=hits or [], args=args, total_items=total)
 
 
+class SearchIndexQueryArgs(Schema):
+    """Query arguments for POST /search/index/."""
+
+    full = fields.Boolean(
+        load_default=False,
+        metadata={
+            "description": "If true, perform a full reindex; otherwise incremental."
+        },
+    )
+    semantic = fields.Boolean(
+        load_default=False,
+        metadata={
+            "description": "If true, use semantic (vector) search rather than full-text search."
+        },
+    )
+
+
 class SearchIndexResource(ProtectedResource):
     """Resource to trigger a search reindex."""
 
-    @use_args(
-        {
-            "full": fields.Boolean(load_default=False),
-            "semantic": fields.Boolean(load_default=False),
-        },
-        location="query",
-    )
+    @api_blueprint.arguments(SearchIndexQueryArgs, location="query")
     def post(self, args: Dict):
         """Trigger a reindex."""
         require_permissions([PERM_TRIGGER_REINDEX])
         tree = get_tree_from_jwt_or_fail()
         user_id = get_jwt_identity()
         if args["full"]:
-            task_func = search_reindex_full
+            task_func = (
+                search_reindex_full_semantic
+                if args["semantic"]
+                else search_reindex_full
+            )
         else:
-            task_func = search_reindex_incremental
-        task = run_task(
-            task_func, tree=tree, user_id=user_id, semantic=args["semantic"]
-        )
+            task_func = (
+                search_reindex_incremental_semantic
+                if args["semantic"]
+                else search_reindex_incremental
+            )
+        task = run_task(task_func, tree=tree, user_id=user_id)
         if isinstance(task, AsyncResult):
             return make_task_response(task)
         return Response(status=201)

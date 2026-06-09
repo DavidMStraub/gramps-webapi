@@ -22,25 +22,26 @@
 from typing import BinaryIO, Dict, Optional
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 from flask import current_app, redirect, send_file
 from gramps.gen.db.base import DbReadBase
 
-from ..const import MIME_JPEG
+from ..const import MIME_AVIF
 from .file import FileHandler
 from .image import ThumbnailHandler
 from .util import abort_with_message
 
 
 def get_client(endpoint_url: Optional[str] = None):
-    """Return an S3 client."""
-    return boto3.client(
-        "s3",
-        endpoint_url=endpoint_url,
-        config=boto3.session.Config(
-            s3={"addressing_style": "path"}, signature_version="s3v4"
-        ),
+    """Return an S3 client configured for GCS compatibility."""
+    config = Config(
+        s3={"addressing_style": "path"},
+        signature_version="s3v4",
+        request_checksum_calculation="when_required",
+        response_checksum_validation="when_supported",
     )
+    return boto3.client("s3", endpoint_url=endpoint_url, config=config)
 
 
 def get_object_name(checksum: str, prefix: Optional[str] = None):
@@ -121,9 +122,12 @@ class ObjectStorageFileHandler(FileHandler):
 
     def get_file_size(self) -> int:
         """Return the file size in bytes."""
-        response = self.client.head_object(
-            Bucket=self.bucket_name, Key=self.object_name
-        )
+        try:
+            response = self.client.head_object(
+                Bucket=self.bucket_name, Key=self.object_name
+            )
+        except ClientError as exc:
+            raise FileNotFoundError from exc
         file_size = response["ContentLength"]
         return file_size
 
@@ -138,28 +142,31 @@ class ObjectStorageFileHandler(FileHandler):
 
     def send_cropped(self, x1: int, y1: int, x2: int, y2: int, square: bool = False):
         """Send cropped image."""
+        self._abort_if_too_large()
         fileobj = self._download_fileobj()
         thumb = ThumbnailHandler(fileobj, self.mime)
         buffer = thumb.get_cropped(x1=x1, y1=y1, x2=x2, y2=y2, square=square)
-        return send_file(buffer, mimetype=MIME_JPEG)
+        return send_file(buffer, mimetype=MIME_AVIF)
 
     def send_thumbnail(self, size: int, square: bool = False):
         """Send thumbnail of image."""
+        self._abort_if_too_large()
         fileobj = self._download_fileobj()
         thumb = ThumbnailHandler(fileobj, self.mime)
         buffer = thumb.get_thumbnail(size=size, square=square)
-        return send_file(buffer, mimetype=MIME_JPEG)
+        return send_file(buffer, mimetype=MIME_AVIF)
 
     def send_thumbnail_cropped(
         self, size: int, x1: int, y1: int, x2: int, y2: int, square: bool = False
     ):
         """Send thumbnail of cropped image."""
+        self._abort_if_too_large()
         fileobj = self._download_fileobj()
         thumb = ThumbnailHandler(fileobj, self.mime)
         buffer = thumb.get_thumbnail_cropped(
             size=size, x1=x1, y1=y1, x2=x2, y2=y2, square=square
         )
-        return send_file(buffer, mimetype=MIME_JPEG)
+        return send_file(buffer, mimetype=MIME_AVIF)
 
 
 def upload_file_s3(

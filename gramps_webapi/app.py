@@ -24,23 +24,43 @@ import os
 import warnings
 from typing import Any, Dict, Optional
 
+import flask_smorest
 from flask import Flask, abort, g, send_from_directory
 from flask_compress import Compress
 from flask_cors import CORS
-from flask_jwt_extended import JWTManager
+from flask_jwt_extended import JWTManager, verify_jwt_in_request
+from flask_jwt_extended.exceptions import WrongTokenError
 from gramps.gen.config import config as gramps_config
 from gramps.gen.config import set as setconfig
+from PIL import Image
 
 from .api import api_blueprint
-from .api.cache import request_cache, thumbnail_cache
+from .api.resources.schemas import (
+    CitationSchema,
+    EventSchema,
+    FamilySchema,
+    MediaSchema,
+    NoteSchema,
+    PlaceSchema,
+    RepositorySchema,
+    SourceSchema,
+    TagSchema,
+)
+from .api.cache import persistent_cache, request_cache, thumbnail_cache
 from .api.ratelimiter import limiter
-from .api.search.embeddings import load_model
-from .api.util import close_db
+from .api.search.embeddings import create_remote_embedding_function, load_model
+from .api.tasks import run_task, send_telemetry_task
+from .api.telemetry import get_server_uuid, should_send_telemetry
+from .api.util import close_db, get_tree_from_jwt
 from .auth import user_db
+from .auth.oidc import init_oidc
+from .auth.token_blocklist import is_jti_blocklisted
 from .config import DefaultConfig, DefaultConfigJWT
-from .const import API_PREFIX, ENV_CONFIG_FILE, TREE_MULTI
+from .const import API_PREFIX, ENV_CONFIG_FILE, TREE_MULTI, VERSION
 from .dbmanager import WebDbManager
 from .util.celery import create_celery
+
+_LOG = logging.getLogger(__name__)
 
 
 def deprecated_config_from_env(app):
@@ -76,7 +96,7 @@ def deprecated_config_from_env(app):
     return app
 
 
-def create_app(config: Optional[Dict[str, Any]] = None):
+def create_app(config: Optional[Dict[str, Any]] = None, config_from_env: bool = True):
     """Flask application factory."""
     app = Flask(__name__)
 
@@ -93,7 +113,8 @@ def create_app(config: Optional[Dict[str, Any]] = None):
     deprecated_config_from_env(app)
 
     # use prefixed environment variables if exist
-    app.config.from_prefixed_env(prefix="GRAMPSWEB")
+    if config_from_env:
+        app.config.from_prefixed_env(prefix="GRAMPSWEB")
 
     # update config from dictionary if present
     if config:
@@ -114,12 +135,20 @@ def create_app(config: Optional[Dict[str, Any]] = None):
         app.logger.setLevel(app.config["LOG_LEVEL"])
 
     if app.config["TREE"] != TREE_MULTI:
-        # create database if missing (only in single-tree mode)
-        WebDbManager(
-            name=app.config["TREE"],
-            create_if_missing=True,
-            ignore_lock=app.config["IGNORE_DB_LOCK"],
-        )
+        if app.config.get("TREE_ID"):
+            # TREE_ID takes precedence: identify tree by dirname, never by name
+            WebDbManager(
+                dirname=app.config["TREE_ID"],
+                create_if_missing=False,
+                ignore_lock=app.config["IGNORE_DB_LOCK"],
+            )
+        else:
+            # legacy: identify tree by display name
+            WebDbManager(
+                name=app.config["TREE"],
+                create_if_missing=True,
+                ignore_lock=app.config["IGNORE_DB_LOCK"],
+            )
 
     if app.config["TREE"] == TREE_MULTI and not app.config["MEDIA_PREFIX_TREE"]:
         warnings.warn(
@@ -137,30 +166,82 @@ def create_app(config: Optional[Dict[str, Any]] = None):
     app.config.from_object(DefaultConfigJWT)
 
     # instantiate JWT manager
-    JWTManager(app)
+    jwt = JWTManager(app)
+
+    # Register token blocklist callback for OIDC backchannel logout
+    @jwt.token_in_blocklist_loader
+    def check_if_token_revoked(jwt_header, jwt_payload):
+        jti = jwt_payload.get("jti")
+        return is_jti_blocklisted(jti) if jti else False
 
     app.config["SQLALCHEMY_DATABASE_URI"] = app.config["USER_DB_URI"]
     user_db.init_app(app)
 
-    request_cache.init_app(app, config=app.config["REQUEST_CACHE_CONFIG"])
-    thumbnail_cache.init_app(app, config=app.config["THUMBNAIL_CACHE_CONFIG"])
+    # initialize OIDC if enabled
+    init_oidc(app)
+
+    if os.getenv("DISABLE_CACHES") != "1":
+        request_cache.init_app(app, config=app.config["REQUEST_CACHE_CONFIG"])
+        thumbnail_cache.init_app(app, config=app.config["THUMBNAIL_CACHE_CONFIG"])
+        persistent_cache.init_app(app, config=app.config["PERSISTENT_CACHE_CONFIG"])
+        # Eagerly assign a server UUID before gunicorn forks workers, so all
+        # workers share the same stored value rather than racing to generate one.
+        with app.app_context():
+            try:
+                get_server_uuid()
+            except Exception as exc:
+                _LOG.warning("Could not initialize telemetry server UUID: %s", exc)
+    else:
+        app.logger.info(
+            "Caches are disabled (DISABLE_CACHES is set). Caches should be enabled in production environment.",
+        )
+        null_cache_config = {"CACHE_TYPE": "null"}
+        request_cache.init_app(app, config=null_cache_config)
+        thumbnail_cache.init_app(app, config=null_cache_config)
+        persistent_cache.init_app(app, config=null_cache_config)
 
     # enable CORS for /api/... resources
     if app.config.get("CORS_ORIGINS"):
         CORS(
             app,
-            resources={f"{API_PREFIX}/*": {"origins": app.config["CORS_ORIGINS"]}},
+            resources={
+                f"{API_PREFIX}/*": {
+                    "origins": app.config["CORS_ORIGINS"],
+                    "supports_credentials": True,
+                }
+            },
         )
+
+    if max_pixels_param := app.config.get("PILLOW_MAX_IMAGE_PIXELS"):
+        try:
+            max_pixels = int(max_pixels_param)
+            if max_pixels <= 0:
+                raise ValueError("PILLOW_MAX_IMAGE_PIXELS must be positive")
+            Image.MAX_IMAGE_PIXELS = max_pixels
+        except ValueError as e:
+            app.logger.warning(
+                "Error parsing PILLOW_MAX_IMAGE_PIXELS value %r; using Pillow default.",
+                max_pixels_param,
+            )
 
     # enable gzip compression
     Compress(app)
 
     static_path = app.config.get("STATIC_PATH")
 
+    # Files that must never be served from a browser/CDN cache so that
+    # app updates (including service-worker updates) are picked up immediately.
+    _NO_STORE_FILES = {"index.html", "sw.js"}
+
+    def _add_no_store(response):
+        """Set Cache-Control: no-store on the response."""
+        response.cache_control.no_store = True
+        return response
+
     # routes for static hosting (e.g. SPA frontend)
     @app.route("/", methods=["GET", "POST"])
     def send_index():
-        return send_from_directory(static_path, "index.html")
+        return _add_no_store(send_from_directory(static_path, "index.html"))
 
     @app.route("/<path:path>", methods=["GET", "POST"])
     def send_static(path):
@@ -168,16 +249,101 @@ def create_app(config: Optional[Dict[str, Any]] = None):
             # we don't want any erroneous API calls to end up here!
             abort(404)
         if path and os.path.exists(os.path.join(static_path, path)):
-            return send_from_directory(static_path, path)
-        else:
-            return send_from_directory(static_path, "index.html")
+            response = send_from_directory(static_path, path)
+            if os.path.basename(path) in _NO_STORE_FILES:
+                _add_no_store(response)
+            return response
+        # Static assets (paths with an extension) get a real 404 if missing,
+        # so Workbox doesn't silently cache HTML as JS. Extension-free paths
+        # are SPA routes and still receive the index.html shell.
+        if os.path.splitext(path)[1]:
+            abort(404)
+        return _add_no_store(send_from_directory(static_path, "index.html"))
 
     # register the API blueprint
-    app.register_blueprint(api_blueprint)
+    api = flask_smorest.Api(
+        app,
+        spec_kwargs={
+            "info": {
+                "title": "Gramps Web API",
+                "version": VERSION,
+                "description": (
+                    "The Gramps Web API is a REST API that provides access to "
+                    "family tree databases generated and maintained with Gramps, "
+                    "a popular Open Source genealogical research software package."
+                ),
+                "license": {
+                    "name": "GNU Affero General Public License v3.0",
+                    "url": "http://www.gnu.org/licenses/agpl-3.0.html",
+                },
+            },
+            "components": {
+                "securitySchemes": {
+                    "BearerAuth": {
+                        "type": "http",
+                        "scheme": "bearer",
+                        "bearerFormat": "JWT",
+                    }
+                }
+            },
+            "security": [{"BearerAuth": []}],
+        },
+    )
+    api.register_blueprint(api_blueprint)
+
+    # Explicitly register core Gramps object schemas so they appear in the
+    # generated OpenAPI spec even though the base-class GET methods use the
+    # generic Schema() response decorator.
+    for _schema_name, _schema_cls in [
+        ("Citation", CitationSchema),
+        ("Event", EventSchema),
+        ("Family", FamilySchema),
+        ("Media", MediaSchema),
+        ("Note", NoteSchema),
+        ("Place", PlaceSchema),
+        ("Repository", RepositorySchema),
+        ("Source", SourceSchema),
+        ("Tag", TagSchema),
+    ]:
+        api.spec.components.schema(_schema_name, schema=_schema_cls())
+
     limiter.init_app(app)
+
+    # Flask 3.x removed the exc.response early-return from handle_http_exception,
+    # so flask-smorest's handler now intercepts every HTTPException and reformats
+    # it, breaking the {"error": {...}} format produced by abort_with_message.
+    # Re-introduce the exc.response check here, delegating to smorest only when
+    # there is no pre-built custom response.
+    from werkzeug.exceptions import HTTPException
+
+    @app.errorhandler(HTTPException)
+    def handle_http_exception(e):
+        if e.response is not None:
+            return e.response
+        return api.handle_http_exception(e)
 
     # instantiate celery
     create_celery(app)
+
+    @app.before_request
+    def maybe_send_telemetry() -> None:
+        """Send telemetry if needed."""
+        try:
+            if verify_jwt_in_request(optional=True) is None:
+                # for requests without JWT, do nothing
+                return None
+        except WrongTokenError:
+            # for the refresh token endpoint, this will fail
+            return None
+        tree_id = get_tree_from_jwt()
+        if not tree_id:
+            # for endpoints that don't require a JWT, we do nothing
+            return None
+        try:
+            if should_send_telemetry():
+                run_task(send_telemetry_task, tree=tree_id)
+        except Exception as exc:
+            _LOG.warning("Telemetry error: %s", exc)
 
     @app.teardown_appcontext
     def close_db_connection(exception) -> None:
@@ -198,9 +364,15 @@ def create_app(config: Optional[Dict[str, Any]] = None):
         user_db.session.remove()  # pylint: disable=no-member
 
     if app.config.get("VECTOR_EMBEDDING_MODEL"):
-        app.config["_INITIALIZED_VECTOR_EMBEDDING_MODEL"] = load_model(
-            app.config["VECTOR_EMBEDDING_MODEL"]
-        )
+        if app.config.get("VECTOR_EMBEDDING_BASE_URL"):
+            app.config["_EMBEDDING_FUNCTION"] = create_remote_embedding_function(
+                base_url=app.config["VECTOR_EMBEDDING_BASE_URL"],
+                model_name=app.config["VECTOR_EMBEDDING_MODEL"],
+                api_key=app.config.get("VECTOR_EMBEDDING_API_KEY"),
+            )
+        else:
+            model = load_model(app.config["VECTOR_EMBEDDING_MODEL"])
+            app.config["_EMBEDDING_FUNCTION"] = model.encode
 
     @app.route("/ready", methods=["GET"])
     def ready():

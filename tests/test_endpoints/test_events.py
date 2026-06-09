@@ -24,7 +24,7 @@ import unittest
 from . import BASE_URL, get_object_count, get_test_client
 from .checks import (
     check_boolean_parameter,
-    check_conforms_to_schema,
+    check_conforms_to_openapi_schema,
     check_invalid_semantics,
     check_invalid_syntax,
     check_keys_parameter,
@@ -57,7 +57,7 @@ class TestEvents(unittest.TestCase):
 
     def test_get_events_conforms_to_schema(self):
         """Test conforms to schema."""
-        check_conforms_to_schema(
+        check_conforms_to_openapi_schema(
             self, TEST_URL + "?extend=all&profile=all&backlinks=1", "Event"
         )
 
@@ -379,6 +379,7 @@ class TestEvents(unittest.TestCase):
                 "confidence": 0,
                 "date": "1987-08-29",
                 "place": "Gainesville, Llano, TX, USA",
+                "place_name": "Gainesville",
                 "type": "Birth",
                 "summary": "Birth - Warner, Sarah Suzanne",
                 "participants": {
@@ -389,12 +390,14 @@ class TestEvents(unittest.TestCase):
                                 "birth": {
                                     "date": "1987-08-29",
                                     "place": "Gainesville, Llano, TX, USA",
+                                    "place_name": "Gainesville",
                                     "type": "Birth",
                                     "summary": "Birth - Warner, Sarah Suzanne",
                                 },
                                 "death": {},
                                 "gramps_id": "I0001",
                                 "handle": "66TJQC6CC7ZWL9YZ64",
+                                "name_display": "Warner, Sarah Suzanne",
                                 "name_given": "Sarah Suzanne",
                                 "name_surname": "Warner",
                                 "name_suffix": "",
@@ -410,12 +413,14 @@ class TestEvents(unittest.TestCase):
                             "birth": {
                                 "date": "1987-08-29",
                                 "place": "Gainesville, Llano, TX, USA",
+                                "place_name": "Gainesville",
                                 "type": "Birth",
                                 "summary": "Birth - Warner, Sarah Suzanne",
                             },
                             "death": {},
                             "gramps_id": "I0001",
                             "handle": "66TJQC6CC7ZWL9YZ64",
+                            "name_display": "Warner, Sarah Suzanne",
                             "name_given": "Sarah Suzanne",
                             "name_surname": "Warner",
                             "name_suffix": "",
@@ -439,6 +444,32 @@ class TestEvents(unittest.TestCase):
             self, TEST_URL + "?page=1&keys=profile&profile=all&locale=de"
         )
         self.assertEqual(rv[0]["profile"]["summary"], "Geburt - Warner, Sarah Suzanne")
+
+    def test_get_events_parameter_profile_summary_family_participant_with_locale(self):
+        """Test that family event participants are properly localized (marriage events)."""
+        # Query marriage events with German locale and check for family participant translation
+        rv = check_success(
+            self,
+            TEST_URL
+            + '?page=1&pagesize=1000&rules={"rules":[{"name":"HasType","values":["Marriage"]}]}&keys=profile&profile=all&locale=de',
+        )
+        # Check multiple marriage events until we find one with family participants
+        found_family_connector = False
+        for event in rv:
+            summary = event["profile"]["summary"]
+            # Should contain German event type
+            self.assertIn("Heirat", summary)
+            # Check if this event has family participants (German connector "und")
+            if " und " in summary:
+                found_family_connector = True
+                # Ensure it doesn't have English connector
+                self.assertNotIn(" and ", summary)
+                break
+        # Ensure at least one marriage event had family participants
+        self.assertTrue(
+            found_family_connector,
+            "No marriage event with family participant found (German 'und' connector missing)",
+        )
 
     def test_get_events_parameter_backlinks_validate_semantics(self):
         """Test invalid backlinks parameter and values."""
@@ -487,7 +518,7 @@ class TestEventsHandle(unittest.TestCase):
 
     def test_get_events_handle_conforms_to_schema(self):
         """Test conforms to schema."""
-        check_conforms_to_schema(
+        check_conforms_to_openapi_schema(
             self,
             TEST_URL + "a5af0eb6dd140de132c?extend=all&profile=all&backlinks=1",
             "Event",
@@ -515,7 +546,7 @@ class TestEventsHandle(unittest.TestCase):
 
     def test_get_events_handle_parameter_strip_expected_result(self):
         """Test strip parameter produces expected result."""
-        check_strip_parameter(self, TEST_URL + "a5af0eb6dd140de132c")
+        check_strip_parameter(self, TEST_URL + "a5af0eb6dd140de132c", paginate=False)
 
     def test_get_events_handle_parameter_keys_validate_semantics(self):
         """Test invalid keys parameter and values."""
@@ -635,6 +666,7 @@ class TestEventsHandle(unittest.TestCase):
                 "confidence": 0,
                 "date": "1250",
                 "place": "Atchison, Atchison, KS, USA",
+                "place_name": "Atchison",
                 "type": "Birth",
                 "summary": "Birth - Knudsen, Ralph",
                 "participants": {
@@ -645,17 +677,20 @@ class TestEventsHandle(unittest.TestCase):
                                 "birth": {
                                     "date": "1250",
                                     "place": "Atchison, Atchison, KS, USA",
+                                    "place_name": "Atchison",
                                     "type": "Birth",
                                     "summary": "Birth - Knudsen, Ralph",
                                 },
                                 "death": {
                                     "date": "1316",
                                     "place": "",
+                                    "place_name": "",
                                     "type": "Death",
                                     "summary": "Death - Knudsen, Ralph",
                                 },
                                 "gramps_id": "I1020",
                                 "handle": "H4EKQCFV3436HSKY2D",
+                                "name_display": "Knudsen, Ralph",
                                 "name_given": "Ralph",
                                 "name_surname": "Knudsen",
                                 "name_suffix": "",
@@ -671,22 +706,25 @@ class TestEventsHandle(unittest.TestCase):
                             "birth": {
                                 "date": "1250",
                                 "place": "Atchison, Atchison, KS, USA",
+                                "place_name": "Atchison",
                                 "type": "Birth",
                                 "summary": "Birth - Knudsen, Ralph",
                             },
                             "death": {
                                 "date": "1316",
                                 "place": "",
+                                "place_name": "",
                                 "type": "Death",
                                 "summary": "Death - Knudsen, Ralph",
                             },
                             "gramps_id": "I1020",
                             "handle": "H4EKQCFV3436HSKY2D",
+                            "name_display": "Knudsen, Ralph",
                             "name_given": "Ralph",
                             "name_surname": "Knudsen",
                             "name_suffix": "",
                             "sex": "M",
-                        },
+                        }
                     ],
                 },
             },
@@ -702,6 +740,7 @@ class TestEventsHandle(unittest.TestCase):
                 "confidence": 0,
                 "date": "1250",
                 "place": "Atchison, Atchison, KS, USA",
+                "place_name": "Atchison",
                 "type": "Geburt",
                 "summary": "Geburt - Knudsen, Ralph",
                 "participants": {
@@ -712,17 +751,20 @@ class TestEventsHandle(unittest.TestCase):
                                 "birth": {
                                     "date": "1250",
                                     "place": "Atchison, Atchison, KS, USA",
+                                    "place_name": "Atchison",
                                     "type": "Geburt",
                                     "summary": "Geburt - Knudsen, Ralph",
                                 },
                                 "death": {
                                     "date": "1316",
                                     "place": "",
+                                    "place_name": "",
                                     "type": "Tod",
                                     "summary": "Tod - Knudsen, Ralph",
                                 },
                                 "gramps_id": "I1020",
                                 "handle": "H4EKQCFV3436HSKY2D",
+                                "name_display": "Knudsen, Ralph",
                                 "name_given": "Ralph",
                                 "name_surname": "Knudsen",
                                 "name_suffix": "",
@@ -738,17 +780,97 @@ class TestEventsHandle(unittest.TestCase):
                             "birth": {
                                 "date": "1250",
                                 "place": "Atchison, Atchison, KS, USA",
+                                "place_name": "Atchison",
                                 "type": "Geburt",
                                 "summary": "Geburt - Knudsen, Ralph",
                             },
                             "death": {
                                 "date": "1316",
                                 "place": "",
+                                "place_name": "",
                                 "type": "Tod",
                                 "summary": "Tod - Knudsen, Ralph",
                             },
                             "gramps_id": "I1020",
                             "handle": "H4EKQCFV3436HSKY2D",
+                            "name_display": "Knudsen, Ralph",
+                            "name_given": "Ralph",
+                            "name_surname": "Knudsen",
+                            "name_suffix": "",
+                            "sex": "M",
+                        }
+                    ],
+                },
+            },
+        )
+
+    def test_get_events_handle_parameter_profile_expected_result_with_name_format(self):
+        """Test response as expected."""
+        rv = check_success(
+            self,
+            TEST_URL + "a5af0eb6dd140de132c?profile=all&name_format=%25f%20%25M",
+        )
+        self.assertEqual(
+            rv["profile"],
+            {
+                "citations": 0,
+                "confidence": 0,
+                "date": "1250",
+                "place": "Atchison, Atchison, KS, USA",
+                "place_name": "Atchison",
+                "type": "Birth",
+                "summary": "Birth - Knudsen, Ralph",
+                "participants": {
+                    "families": [],
+                    "people": [
+                        {
+                            "person": {
+                                "birth": {
+                                    "date": "1250",
+                                    "place": "Atchison, Atchison, KS, USA",
+                                    "place_name": "Atchison",
+                                    "type": "Birth",
+                                    "summary": "Birth - Knudsen, Ralph",
+                                },
+                                "death": {
+                                    "date": "1316",
+                                    "place": "",
+                                    "place_name": "",
+                                    "type": "Death",
+                                    "summary": "Death - Knudsen, Ralph",
+                                },
+                                "gramps_id": "I1020",
+                                "handle": "H4EKQCFV3436HSKY2D",
+                                "name_display": "Ralph KNUDSEN",
+                                "name_given": "Ralph",
+                                "name_surname": "Knudsen",
+                                "name_suffix": "",
+                                "sex": "M",
+                            },
+                            "role": "Primary",
+                        }
+                    ],
+                },
+                "references": {
+                    "person": [
+                        {
+                            "birth": {
+                                "date": "1250",
+                                "place": "Atchison, Atchison, KS, USA",
+                                "place_name": "Atchison",
+                                "type": "Birth",
+                                "summary": "Birth - Knudsen, Ralph",
+                            },
+                            "death": {
+                                "date": "1316",
+                                "place": "",
+                                "place_name": "",
+                                "type": "Death",
+                                "summary": "Death - Knudsen, Ralph",
+                            },
+                            "gramps_id": "I1020",
+                            "handle": "H4EKQCFV3436HSKY2D",
+                            "name_display": "Ralph KNUDSEN",
                             "name_given": "Ralph",
                             "name_surname": "Knudsen",
                             "name_suffix": "",

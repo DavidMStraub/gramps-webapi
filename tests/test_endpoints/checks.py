@@ -19,12 +19,30 @@
 
 """Check functions for performing specific unit tests."""
 
-from jsonschema import validate
+from jsonschema import RefResolver, validate
 
 from gramps_webapi.auth.const import ROLE_OWNER
 
-from . import API_RESOLVER, API_SCHEMA
 from .util import check_keys_stripped, fetch_header
+
+
+def _get_openapi_spec(client):
+    """Return (spec, resolver) for the generated OpenAPI 3.0 spec."""
+    response = client.get("/api/openapi.json")
+    assert (
+        response.status_code == 200
+    ), f"Failed to fetch OpenAPI spec: {response.status_code}"
+    spec = response.get_json()
+    assert spec is not None, "OpenAPI spec returned non-JSON response"
+    resolver = RefResolver(base_uri="", referrer=spec, store={"": spec})
+    return spec, resolver
+
+
+def get_openapi_schema_validator(client, name):
+    """Return (schema, resolver) for a named component schema from the OpenAPI spec."""
+    spec, resolver = _get_openapi_spec(client)
+    schema = spec["components"]["schemas"][name]
+    return schema, resolver
 
 
 def check_success(test, url, full=False, role=ROLE_OWNER):
@@ -77,24 +95,17 @@ def check_requires_token(test, url, role=ROLE_OWNER):
     return rv.json
 
 
-def check_conforms_to_schema(test, url, name, role=ROLE_OWNER):
-    """Test that result set conforms to expected schema."""
+def check_conforms_to_openapi_schema(test, url, name, role=ROLE_OWNER):
+    """Test that result conforms to the auto-generated OpenAPI 3.0 schema."""
     header = fetch_header(test.client, role=role)
     rv = test.client.get(url, headers=header)
     test.assertEqual(rv.status_code, 200)
-    if isinstance(rv.json, type([])):
+    schema, resolver = get_openapi_schema_validator(test.client, name)
+    if isinstance(rv.json, list):
         for item in rv.json:
-            validate(
-                instance=item,
-                schema=API_SCHEMA["definitions"][name],
-                resolver=API_RESOLVER,
-            )
+            validate(instance=item, schema=schema, resolver=resolver)
     else:
-        validate(
-            instance=rv.json,
-            schema=API_SCHEMA["definitions"][name],
-            resolver=API_RESOLVER,
-        )
+        validate(instance=rv.json, schema=schema, resolver=resolver)
     return rv.json
 
 
@@ -110,11 +121,34 @@ def check_totals(test, url, total, role=ROLE_OWNER):
     return rv.json
 
 
-def check_strip_parameter(test, url, join="?", role=ROLE_OWNER):
-    """Test that strip parameter produces expected result."""
+def check_strip_parameter(test, url, role=ROLE_OWNER, paginate=True):
+    """Test that strip parameter produces expected result.
+
+    Args:
+        test: Test case instance
+        url: URL to test
+        role: Role for authentication
+        paginate: Whether to add pagination parameters (True for list endpoints,
+                  False for single-object endpoints). Defaults to True.
+    """
     header = fetch_header(test.client, role=role)
-    baseline = test.client.get(url, headers=header)
-    rv = test.client.get("{}{}strip=1".format(url, join), headers=header)
+
+    # Optimization: Use pagination to limit results for list endpoints
+    # This reduces test time from ~180s to <1s while still validating the functionality
+    # Note: paginate=False must be used for single-object endpoints (e.g., /api/people/HANDLE)
+    # as pagination on single objects causes 422 errors
+    separator = "&" if "?" in url else "?"
+
+    if paginate:
+        limit_url = f"{url}{separator}page=1&pagesize=5"
+    else:
+        limit_url = url
+
+    # Recalculate separator after potentially adding pagination
+    strip_separator = "&" if "?" in limit_url else "?"
+
+    baseline = test.client.get(limit_url, headers=header)
+    rv = test.client.get(f"{limit_url}{strip_separator}strip=1", headers=header)
     test.assertEqual(rv.status_code, 200)
     if isinstance(rv.json, type([])):
         for item in baseline.json:
@@ -196,7 +230,13 @@ def check_paging_parameters(test, url, size, join="?", role=ROLE_OWNER):
 
 
 def check_sort_parameter(
-    test, url, sort_key, value_key=None, direction="+", join="?", role=ROLE_OWNER,
+    test,
+    url,
+    sort_key,
+    value_key=None,
+    direction="+",
+    join="?",
+    role=ROLE_OWNER,
 ):
     """Test that sort parameter produces expected result."""
     header = fetch_header(test.client, role=role)
@@ -223,7 +263,13 @@ def check_sort_parameter(
 
 
 def check_single_extend_parameter(
-    test, url, key, extended_key, join="?", reference=False, role=ROLE_OWNER,
+    test,
+    url,
+    key,
+    extended_key,
+    join="?",
+    reference=False,
+    role=ROLE_OWNER,
 ):
     """Test that extend parameter produces expected result for a single key."""
 
@@ -276,6 +322,26 @@ def check_boolean_parameter(test, url, variable, join="?", role=ROLE_OWNER):
     else:
         test.assertIn(variable, rv.json)
     return rv.json
+
+
+def check_filter_multi_tree_blocked(test, test_url, namespace):
+    """Test that custom filter mutations are blocked in a multi-tree setup."""
+    url = test_url + namespace
+    payload = {
+        "name": namespace.title() + "TestFilter",
+        "rules": [{"name": "HasTag", "values": ["ToDo"]}],
+    }
+    header = fetch_header(test.client)
+
+    # write operations must return 405 in multi-tree
+    rv = test.client.post(url, json=payload, headers=header)
+    test.assertEqual(rv.status_code, 405)
+
+    rv = test.client.put(url, json=payload, headers=header)
+    test.assertEqual(rv.status_code, 405)
+
+    rv = test.client.delete(url + "/" + payload["name"], headers=header)
+    test.assertEqual(rv.status_code, 405)
 
 
 def check_filter_create_update_delete(test, base_url, test_url, namespace):

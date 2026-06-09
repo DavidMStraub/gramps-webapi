@@ -26,7 +26,17 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
+import threading
 from uuid import uuid4
+
+# Guard against registering plugins more than once per process.
+# BasePluginManager is a singleton, so repeated calls to reg_plugins()
+# accumulate duplicates in its internal list, which causes an AssertionError
+# in newer Gramps versions that assert list/dict consistency.
+# The lock ensures the check/register/set sequence is atomic in threaded workers.
+_plugins_registered = False
+_plugins_lock = threading.Lock()
 
 from gramps.gen.config import config
 from gramps.gen.const import GRAMPS_LOCALE as glocale
@@ -37,7 +47,6 @@ from gramps.gen.db.utils import make_database
 from gramps.gen.dbstate import DbState
 from gramps.gen.display.name import displayer as name_displayer
 from gramps.gen.plug import BasePluginManager
-from gramps.gen.recentfiles import recent_files
 from gramps.gen.user import UserBase
 from gramps.gen.utils.config import get_researcher
 from gramps.gen.utils.configmanager import ConfigManager
@@ -47,6 +56,15 @@ from .undodb import DbUndoSQLWeb
 _ = glocale.translation.gettext
 
 LOG = logging.getLogger(__name__)
+
+# Module-level cache for PostgreSQL settings.ini credentials (base fields only,
+# without username/password which are supplied per-request).  Keyed by the
+# absolute database directory path.  Each entry is a (mtime_ns, dbkwargs) tuple;
+# the mtime_ns is compared on every call so that external edits to settings.ini
+# are picked up without requiring a process restart.
+_postgres_creds_cache: dict[str, tuple[int, dict]] = (
+    {}
+)  # dirpath -> (mtime_ns, base dbkwargs dict)
 
 
 class DbLockedError(Exception):
@@ -73,26 +91,62 @@ def get_title(filename: str) -> str:
 def get_postgres_credentials(directory, username, password):
     """Get the credentials for PostgreSQL."""
     config_file = os.path.join(directory, "settings.ini")
-    config_mgr = ConfigManager(config_file)
-    config_mgr.register("database.dbname", "")
-    config_mgr.register("database.host", "")
-    config_mgr.register("database.port", "")
-    config_mgr.register("tree.uuid", "")
 
-    if not os.path.exists(config_file):
-        config_mgr.set("database.dbname", "gramps")
-        config_mgr.set("database.host", config.get("database.host"))
-        config_mgr.set("database.port", config.get("database.port"))
-        config_mgr.set("tree.uuid", uuid4().hex)
-        config_mgr.save()
+    # Determine whether the cache is still valid by comparing mtime_ns.
+    # If settings.ini has been edited externally the new values will be picked
+    # up on the next call without requiring a process restart.
+    try:
+        current_mtime = os.stat(config_file).st_mtime_ns
+    except OSError:
+        current_mtime = 0
 
-    config_mgr.load()
+    cached = _postgres_creds_cache.get(directory)
+    if cached is None or cached[0] != current_mtime:
+        config_mgr = ConfigManager(config_file)
+        config_mgr.register("database.dbname", "")
+        config_mgr.register("database.host", "")
+        config_mgr.register("database.port", "")
+        config_mgr.register("tree.uuid", "")
 
-    dbkwargs = {}
-    for key in config_mgr.get_section_settings("database"):
-        value = config_mgr.get("database." + key)
-        if value:
-            dbkwargs[key] = value
+        if not os.path.exists(config_file):
+            # Write to a temp file then hard-link it into place atomically.
+            # os.link() fails with FileExistsError if another process already
+            # created config_file, so we never clobber a racing writer.
+            config_dir = os.path.dirname(config_file)
+            tmp_fd, tmp_file = tempfile.mkstemp(dir=config_dir)
+            try:
+                os.close(tmp_fd)
+                config_mgr.set("database.dbname", "gramps")
+                config_mgr.set("database.host", config.get("database.host"))
+                config_mgr.set("database.port", config.get("database.port"))
+                config_mgr.set("tree.uuid", uuid4().hex)
+                config_mgr.filename = tmp_file
+                config_mgr.save()
+                try:
+                    os.link(tmp_file, config_file)
+                except FileExistsError:
+                    pass  # another process won the race; load their config
+            finally:
+                config_mgr.filename = config_file
+                try:
+                    os.unlink(tmp_file)
+                except OSError:
+                    pass
+            try:
+                current_mtime = os.stat(config_file).st_mtime_ns
+            except OSError:
+                current_mtime = 0
+
+        config_mgr.load()
+
+        dbkwargs: dict = {}
+        for key in config_mgr.get_section_settings("database"):
+            value = config_mgr.get("database." + key)
+            if value:
+                dbkwargs[key] = value
+        _postgres_creds_cache[directory] = (current_mtime, dbkwargs)
+
+    dbkwargs = dict(_postgres_creds_cache[directory][1])
     if username:
         dbkwargs["user"] = username
     if password:
@@ -118,8 +172,13 @@ class WebDbSessionManager:
         username: str | None,
         password: str | None,
         force_schema_upgrade: bool = False,
+        dbid: str | None = None,
     ):
-        """Open a database from a file."""
+        """Open a database from a file.
+
+        If ``dbid`` is supplied (the backend identifier already read from
+        ``DBBACKEND`` by the caller), the file is not read again.
+        """
         if (
             mode == DBMODE_W
             and os.path.exists(filename)
@@ -132,9 +191,10 @@ class WebDbSessionManager:
                 _("You do not have write access " "to the selected file."),
             )
 
-        dbid_path = os.path.join(filename, DBBACKEND)
-        with open(dbid_path) as file_handle:
-            dbid = file_handle.read().strip()
+        if dbid is None:
+            dbid_path = os.path.join(filename, DBBACKEND)
+            with open(dbid_path) as file_handle:
+                dbid = file_handle.read().strip()
 
         db = make_database(dbid)
 
@@ -183,13 +243,25 @@ class WebDbSessionManager:
         username=None,
         password=None,
         ignore_lock: bool = False,
+        title: str | None = None,
+        dbid: str | None = None,
     ):
-        """Open and make a family tree active."""
+        """Open and make a family tree active.
+
+        If ``title`` is provided, it is used directly as the database title,
+        avoiding a disk read of ``name.txt``. Pass ``None`` (default) to let
+        the method fall back to reading the title from disk via
+        ``get_title()``.
+
+        If ``dbid`` is provided, it is forwarded to :meth:`read_file` so the
+        ``DBBACKEND`` file is not read a second time.
+        """
         if not ignore_lock:
             check_lock(dir_name=filename, mode=mode)
-        self.read_file(filename, mode, username, password)
-        # Attempt to figure out the database title
-        title = get_title(filename)
+        self.read_file(filename, mode, username, password, dbid=dbid)
+        # Use provided title to avoid re-reading name.txt; fall back for safety
+        if title is None:
+            title = get_title(filename)
         self._post_load_newdb(filename, title)
 
     def _post_load_newdb(self, filename, title=None):
@@ -197,12 +269,7 @@ class WebDbSessionManager:
         if not filename:
             return
 
-        if filename[-1] == os.path.sep:
-            filename = filename[:-1]
-        name = os.path.basename(filename)
         self.dbstate.db.db_name = title
-        if title:
-            name = title
 
         # apply preferred researcher if loaded file has none
         res = self.dbstate.db.get_researcher()
@@ -220,14 +287,17 @@ class WebDbSessionManager:
 
         self.dbstate.db.enable_signals()
         self.dbstate.signal_change()
-
-        config.set("paths.recent-file", filename)
-
-        recent_files(filename, name)
+        # skip config.set("paths.recent-file") and recent_files():
+        # these are Gramps desktop-only bookkeeping and cause unnecessary disk I/O
 
     def do_reg_plugins(self, dbstate, uistate, rescan=False):
         """Register the plugins at initialization time."""
-        self._pmgr.reg_plugins(PLUGINS_DIR, dbstate, uistate, rescan=rescan)
-        self._pmgr.reg_plugins(USER_PLUGINS, dbstate, uistate, load_on_reg=True)
-        if rescan:  # supports updated plugin installs
-            self._pmgr.reload_plugins()
+        global _plugins_registered
+        with _plugins_lock:
+            if _plugins_registered and not rescan:
+                return
+            self._pmgr.reg_plugins(PLUGINS_DIR, dbstate, uistate, rescan=rescan)
+            self._pmgr.reg_plugins(USER_PLUGINS, dbstate, uistate, load_on_reg=True)
+            if rescan:  # supports updated plugin installs
+                self._pmgr.reload_plugins()
+            _plugins_registered = True

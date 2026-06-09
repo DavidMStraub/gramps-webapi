@@ -37,7 +37,7 @@ from gramps_webapi.const import (
 
 from . import BASE_URL, TEST_USERS, get_test_client
 from .checks import (
-    check_conforms_to_schema,
+    check_conforms_to_openapi_schema,
     check_invalid_semantics,
     check_invalid_syntax,
     check_requires_token,
@@ -63,7 +63,7 @@ class TestReports(unittest.TestCase):
 
     def test_get_reports_conforms_to_schema(self):
         """Test conformity to schema."""
-        check_conforms_to_schema(self, TEST_URL, "Report")
+        check_conforms_to_openapi_schema(self, TEST_URL, "Report")
 
     def test_get_reports_validate_semantics(self):
         """Test invalid parameters and values."""
@@ -92,7 +92,7 @@ class TestReportsReportId(unittest.TestCase):
 
     def test_get_reports_report_id_conforms_to_schema(self):
         """Test conformity to schema."""
-        check_conforms_to_schema(self, TEST_URL + "ancestor_report", "Report")
+        check_conforms_to_openapi_schema(self, TEST_URL + "ancestor_report", "Report")
 
     def test_get_reports_report_id_missing_content(self):
         """Test response for missing content."""
@@ -280,14 +280,8 @@ class TestReportsEmptyDatabase(unittest.TestCase):
         cls.dbman = CLIDbManager(DbState())
         cls.dbpath, _name = cls.dbman.create_new_db_cli(cls.name, dbid="sqlite")
         cls.dbman.create_new_db_cli(cls.name, dbid="sqlite")
-        with patch.dict(
-            "os.environ",
-            {
-                ENV_CONFIG_FILE: TEST_EMPTY_GRAMPS_AUTH_CONFIG,
-                "TREE": cls.name,
-            },
-        ):
-            cls.test_app = create_app()
+        with patch.dict("os.environ", {ENV_CONFIG_FILE: TEST_EMPTY_GRAMPS_AUTH_CONFIG}):
+            cls.test_app = create_app(config_from_env=False, config={"TREE": cls.name})
         cls.test_app.config["TESTING"] = True
         cls.client = cls.test_app.test_client()
         cls.tree = os.path.basename(cls.dbpath)

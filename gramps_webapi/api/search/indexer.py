@@ -21,12 +21,14 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Set
 
 import sifts
 from gramps.gen.db.base import DbReadBase
 
+from ...types import ProgressCallback
 from .text import iter_obj_strings, obj_strings_from_handle
+from .metadata import get_stored_model_name, set_stored_model_name
 from ..util import get_total_number_of_objects, get_object_timestamps
 
 
@@ -39,7 +41,7 @@ class SearchIndexerBase:
     def __init__(
         self,
         tree: str,
-        db_url: Optional[str] = None,
+        db_url: str | None = None,
         embedding_function: Callable | None = None,
         use_fts: bool = True,
         use_semantic_text: bool = False,
@@ -126,7 +128,7 @@ class SearchIndexerBase:
         self.index_public.add(contents=contents, ids=ids, metadatas=metadatas)
 
     def reindex_full(
-        self, db_handle: DbReadBase, progress_cb: Optional[Callable] = None
+        self, db_handle: DbReadBase, progress_cb: ProgressCallback | None = None
     ):
         """Reindex the whole database."""
         total = get_total_number_of_objects(db_handle)
@@ -213,7 +215,7 @@ class SearchIndexerBase:
             self._add_objects([obj_dict])
 
     def reindex_incremental(
-        self, db_handle: DbReadBase, progress_cb: Optional[Callable] = None
+        self, db_handle: DbReadBase, progress_cb: ProgressCallback | None = None
     ):
         """Update the index incrementally."""
         update_info = self._get_update_info(db_handle)
@@ -271,10 +273,11 @@ class SearchIndexerBase:
     @staticmethod
     def _format_hit(hit, rank, include_content: bool) -> Dict[str, Any]:
         """Format a search hit."""
+        score = hit.get("rank")
         formatted_hit = {
             "handle": hit["metadata"]["handle"],
             "object_type": hit["metadata"]["type"],
-            "score": hit.get("rank"),
+            "score": float(score) if score is not None else None,
             "rank": rank,
         }
         if include_content:
@@ -287,10 +290,10 @@ class SearchIndexerBase:
         page: int,
         pagesize: int,
         include_private: bool = True,
-        sort: Optional[List[str]] = None,
-        object_types: Optional[List[str]] = None,
-        change_op: Optional[str] = None,
-        change_value: Optional[float] = None,
+        sort: List[str] | None = None,
+        object_types: List[str] | None = None,
+        change_op: str | None = None,
+        change_value: float | None = None,
         include_content: bool = False,
     ):
         """Search the index.
@@ -338,7 +341,7 @@ class SearchIndexer(SearchIndexerBase):
     def __init__(
         self,
         tree: str,
-        db_url: Optional[str] = None,
+        db_url: str | None = None,
     ):
         """Initialize the indexer."""
         super().__init__(
@@ -355,10 +358,23 @@ class SemanticSearchIndexer(SearchIndexerBase):
     def __init__(
         self,
         tree: str,
-        db_url: Optional[str] = None,
+        db_url: str | None = None,
         embedding_function: Callable | None = None,
+        model_name: str | None = None,
+        skip_model_check: bool = False,
     ):
         """Initialize the indexer."""
+        # Check for model mismatch BEFORE opening/creating the sifts collections
+        # via super().__init__, so no side effects occur on a stale index.
+        if db_url and model_name and not skip_model_check:
+            stored = get_stored_model_name(db_url, tree)
+            if stored is not None and stored != model_name:
+                raise ValueError(
+                    f"Embedding model mismatch for tree '{tree}': "
+                    f"the search index was built with '{stored}' but the "
+                    f"configured model is '{model_name}'. "
+                    "Run a full semantic reindex to rebuild the index with the new model."
+                )
         super().__init__(
             tree=tree,
             db_url=db_url,
@@ -366,3 +382,13 @@ class SemanticSearchIndexer(SearchIndexerBase):
             use_fts=False,
             use_semantic_text=True,
         )
+        self.model_name = model_name
+        self._db_url = db_url
+
+    def reindex_full(
+        self, db_handle: DbReadBase, progress_cb: ProgressCallback | None = None
+    ):
+        """Rebuild the semantic index and record the model name."""
+        super().reindex_full(db_handle, progress_cb=progress_cb)
+        if self._db_url and self.model_name:
+            set_stored_model_name(self._db_url, self.tree, self.model_name)

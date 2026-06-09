@@ -22,13 +22,16 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from datetime import datetime, timedelta, timezone
 from gettext import gettext as _
 from http import HTTPStatus
 from typing import Any, Callable, Dict, List, Optional, Union
 
+import logging
+import sqlalchemy as sa
 from celery import Task, shared_task
 from celery.result import AsyncResult
-from flask import current_app
+from flask import current_app, jsonify
 from gramps.gen.db import DbTxn
 from gramps.gen.db.base import DbReadBase
 from gramps.gen.errors import HandleError
@@ -37,7 +40,8 @@ from gramps.gen.merge.diff import diff_items
 
 from gramps_webapi.api.search.indexer import SearchIndexer, SemanticSearchIndexer
 
-from ..auth import get_owner_emails
+from ..auth import TaskTree, get_owner_emails
+from ..auth import user_db
 from ..undodb import migrate as migrate_undodb
 from .check import check_database
 from .emails import email_confirm_email, email_new_user, email_reset_pw
@@ -47,14 +51,20 @@ from .media_importer import MediaImporter
 from .report import run_report
 from .resources.delete import delete_all_objects
 from .resources.util import (
+    abort_with_message,
     app_has_semantic_search,
     dry_run_import,
     run_import,
     transaction_to_json,
 )
 from .search import get_search_indexer, get_semantic_search_indexer
+from .telemetry import (
+    get_telemetry_payload,
+    send_telemetry,
+    telemetry_sent_last_24h,
+    update_telemetry_timestamp,
+)
 from .util import (
-    abort_with_message,
     check_quota_people,
     close_db,
     get_config,
@@ -66,19 +76,69 @@ from .util import (
 )
 
 
+def _record_task(task_id: str, task: Task, kwargs: dict) -> None:
+    """Write one audit row to task_tree before the task is dispatched."""
+    row = TaskTree(
+        task_id=task_id,
+        tree=kwargs.get("tree"),
+        user_id=kwargs.get("user_id"),
+        name=task.name,
+        created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+    )
+    user_db.session.add(row)
+    user_db.session.commit()
+
+
+def get_task_result_cutoff() -> datetime:
+    """Return the earliest ``created_at`` that is still within the Celery result TTL."""
+    from celery import current_app as celery_app
+
+    ttl = getattr(celery_app.conf, "result_expires", None)
+    if ttl is None:
+        ttl = timedelta(seconds=86400)
+    elif not isinstance(ttl, timedelta):
+        ttl = timedelta(seconds=int(ttl))
+    return datetime.now(timezone.utc).replace(tzinfo=None) - ttl
+
+
+def _purge_expired_task_rows() -> None:
+    """Delete task_tree rows older than the Celery result TTL."""
+    cutoff = get_task_result_cutoff()
+    user_db.session.query(TaskTree).filter(TaskTree.created_at < cutoff).delete(
+        synchronize_session=False
+    )
+    user_db.session.commit()
+
+
 def run_task(task: Task, **kwargs) -> Union[AsyncResult, Any]:
     """Send a task to the task queue or run immediately if no queue set up."""
     if not current_app.config["CELERY_CONFIG"]:
         with current_app.app_context():
-            return task(**kwargs)
-    return task.delay(**kwargs)
+            try:
+                return task(**kwargs)
+            except Exception as exc:
+                abort_with_message(500, str(exc))
+    task_id = str(uuid.uuid4())
+    try:
+        _purge_expired_task_rows()
+        _record_task(task_id, task, kwargs)
+    except sa.exc.SQLAlchemyError:
+        user_db.session.rollback()
+        logging.getLogger(__name__).warning(
+            "task_tree DB operation failed for task %s; dispatching anyway",
+            task_id,
+            exc_info=True,
+        )
+    return task.apply_async(kwargs=kwargs, task_id=task_id)
 
 
 def make_task_response(task: AsyncResult):
     """Make a 202 response with the location of the task status endpoint."""
     url = f"/api/tasks/{task.id}"
     payload = {"task": {"href": url, "id": task.id}}
-    return payload, HTTPStatus.ACCEPTED
+    response = jsonify(payload)
+    response.status_code = HTTPStatus.ACCEPTED
+    return response
 
 
 def clip_progress(x: float) -> float:
@@ -112,7 +172,12 @@ def send_email_confirm_email(email: str, user_name: str, token: str):
 
 @shared_task()
 def send_email_new_user(
-    username: str, fullname: str, email: str, tree: str, include_admins: bool
+    username: str,
+    fullname: str,
+    email: str,
+    tree: str,
+    include_admins: bool,
+    include_treeless: bool,
 ):
     """Send an email to owners to notify of a new registered user."""
     base_url = get_config("BASE_URL").rstrip("/")
@@ -120,7 +185,9 @@ def send_email_new_user(
         base_url=base_url, username=username, fullname=fullname, email=email
     )
     subject = _("New registered user")
-    emails = get_owner_emails(tree=tree, include_admins=include_admins)
+    emails = get_owner_emails(
+        tree=tree, include_admins=include_admins, include_treeless=include_treeless
+    )
     if emails:
         send_email(subject=subject, body=body, to=emails)
 
@@ -131,7 +198,7 @@ def _search_reindex_full(
     """Rebuild the search index."""
     if semantic:
         indexer: SearchIndexer | SemanticSearchIndexer = get_semantic_search_indexer(
-            tree
+            tree, skip_model_check=True
         )
     else:
         indexer = get_search_indexer(tree)
@@ -175,13 +242,32 @@ def set_progress_title(self, title: str = "", message: str = "") -> None:
 
 
 @shared_task(bind=True)
-def search_reindex_full(self, tree: str, user_id: str, semantic: bool) -> None:
-    """Rebuild the search index."""
+def search_reindex_full(self, tree: str, user_id: str, semantic: bool = False) -> None:
+    """Rebuild the full-text search index (or the semantic index if ``semantic=True``).
+
+    The ``semantic`` parameter is accepted for backward compatibility with
+    jobs that were enqueued before this task was split into separate
+    full-text / semantic variants.  New callers should use
+    ``search_reindex_full_semantic`` for semantic reindexing.
+    """
     return _search_reindex_full(
         tree=tree,
         user_id=user_id,
         semantic=semantic,
         progress_cb=progress_callback_count(self, title="Updating search index..."),
+    )
+
+
+@shared_task(bind=True)
+def search_reindex_full_semantic(self, tree: str, user_id: str) -> None:
+    """Rebuild the semantic search index."""
+    return _search_reindex_full(
+        tree=tree,
+        user_id=user_id,
+        semantic=True,
+        progress_cb=progress_callback_count(
+            self, title="Updating semantic search index..."
+        ),
     )
 
 
@@ -205,8 +291,16 @@ def _search_reindex_incremental(
 
 
 @shared_task(bind=True)
-def search_reindex_incremental(self, tree: str, user_id: str, semantic: bool) -> None:
-    """Run an incremental reindex of the search index."""
+def search_reindex_incremental(
+    self, tree: str, user_id: str, semantic: bool = False
+) -> None:
+    """Run an incremental reindex of the full-text search index (or the semantic index if ``semantic=True``).
+
+    The ``semantic`` parameter is accepted for backward compatibility with
+    jobs that were enqueued before this task was split into separate
+    full-text / semantic variants.  New callers should use
+    ``search_reindex_incremental_semantic`` for semantic reindexing.
+    """
     return _search_reindex_incremental(
         tree=tree,
         user_id=user_id,
@@ -216,16 +310,29 @@ def search_reindex_incremental(self, tree: str, user_id: str, semantic: bool) ->
 
 
 @shared_task(bind=True)
+def search_reindex_incremental_semantic(self, tree: str, user_id: str) -> None:
+    """Run an incremental reindex of the semantic search index."""
+    return _search_reindex_incremental(
+        tree=tree,
+        user_id=user_id,
+        semantic=True,
+        progress_cb=progress_callback_count(
+            self, title="Updating semantic search index..."
+        ),
+    )
+
+
+@shared_task(bind=True)
 def import_file(
     self, tree: str, user_id: str, file_name: str, extension: str, delete: bool = True
 ):
     """Import a file."""
-    object_counts = dry_run_import(file_name=file_name)
+    object_counts = dry_run_import(file_name=file_name, extension=extension)
     if object_counts is None:
         raise ValueError(f"Failed importing {extension} file")
     check_quota_people(to_add=object_counts["people"], tree=tree, user_id=user_id)
     db_handle = get_db_outside_request(
-        tree=tree, view_private=True, readonly=True, user_id=user_id
+        tree=tree, view_private=True, readonly=False, user_id=user_id
     )
     try:
         run_import(
@@ -414,18 +521,6 @@ def upgrade_database_schema(self, tree: str, user_id: str):
 
 
 @shared_task(bind=True)
-def upgrade_undodb_schema(self, tree: str, user_id: str):
-    """Upgrade the schema of the undo database."""
-    db_handle = get_db_outside_request(
-        tree=tree, view_private=True, readonly=False, user_id=user_id
-    )
-    try:
-        migrate_undodb(db_handle.undodb)
-    finally:
-        close_db(db_handle)
-
-
-@shared_task(bind=True)
 def delete_objects(
     self, tree: str, user_id: str, namespaces: Optional[List[str]] = None
 ):
@@ -464,7 +559,12 @@ def delete_objects(
 
 @shared_task(bind=True)
 def process_transactions(
-    self, tree: str, user_id: str, payload: list[dict], force: bool
+    self,
+    tree: str,
+    user_id: str,
+    payload: list[dict],
+    force: bool,
+    message: str = "Raw transaction",
 ):
     """Process a set of database transactions, updating search indices as needed."""
     num_people_deleted = sum(
@@ -479,7 +579,7 @@ def process_transactions(
         tree=tree, view_private=True, readonly=False, user_id=user_id
     )
     try:
-        with DbTxn("Raw transaction", db_handle) as trans:
+        with DbTxn(message, db_handle) as trans:
             for item in payload:
                 try:
                     class_name = item["_class"]
@@ -491,7 +591,7 @@ def process_transactions(
                     ):
                         if num_people_added or num_people_deleted:
                             update_usage_people(tree=tree, user_id=user_id)
-                        abort_with_message(409, "Object has changed")
+                        raise ValueError("Object has changed")
                     new_data = item["new"]
                     if new_data:
                         new_obj = gramps_object_from_dict(new_data)
@@ -509,11 +609,11 @@ def process_transactions(
                     else:
                         if num_people_added or num_people_deleted:
                             update_usage_people(tree=tree, user_id=user_id)
-                        abort_with_message(400, "Unexpected transaction type")
+                        raise ValueError("Unexpected transaction type")
                 except (KeyError, UnicodeDecodeError, json.JSONDecodeError, TypeError):
                     if num_people_added or num_people_deleted:
                         update_usage_people(tree=tree, user_id=user_id)
-                    abort_with_message(400, "Error while processing transaction")
+                    raise ValueError("Error while processing transaction")
             trans_dict = transaction_to_json(trans)
     finally:
         # close the *writeable* db handle regardless of errors
@@ -547,7 +647,7 @@ def process_transactions(
     finally:
         close_db(db_handle)
     return trans_dict
-        
+
 
 def handle_delete(trans: DbTxn, class_name: str, handle: str) -> None:
     """Handle a delete action."""
@@ -564,7 +664,7 @@ def handle_commit(trans: DbTxn, class_name: str, obj) -> None:
 def handle_add(trans: DbTxn, class_name: str, obj) -> None:
     """Handle an add action."""
     if class_name != "Tag" and not obj.gramps_id:
-        abort_with_message(400, "Gramps ID missing")
+        raise ValueError("Gramps ID missing")
     handle_commit(trans, class_name, obj)
 
 
@@ -606,3 +706,89 @@ def update_search_indices_from_transaction(
                 indexer_semantic.add_or_update_object(handle, db_handle, class_name)
     finally:
         close_db(db_handle)
+
+
+@shared_task()
+def send_telemetry_task(tree: str):
+    """Send telemetry"""
+    if telemetry_sent_last_24h():
+        # Although this task will only be called by the backend if it hasn't been
+        # called in the last 24 hours, we check it here again because if a server
+        # is misconfigured and the celery worker is run in a container that doesn't
+        # have access to the same persistent cache as the backend, we don't want to
+        # send telemetry every time a request hits the API.
+        return None
+    data = get_telemetry_payload(tree_id=tree)
+    # Update timestamp before the HTTP call so that a failed send does not
+    # trigger an immediate retry on the next request. This also narrows (but
+    # does not fully eliminate) the window for concurrent workers to send
+    # duplicate pings: the race is now microseconds rather than a full
+    # HTTP round-trip.
+    update_telemetry_timestamp()
+    send_telemetry(data=data)
+
+
+@shared_task(bind=True)
+def process_chat(
+    self,
+    tree: str,
+    user_id: str,
+    query: str,
+    include_private: bool,
+    history: list | None = None,
+    verbose: bool = False,
+    message_history_raw: str | None = None,
+) -> dict[str, Any]:
+    """Process a chat query with the AI agent."""
+    # import here to avoid error if AI dependencies are not installed
+    from gramps_webapi.api.llm import (
+        answer_with_agent,
+        extract_metadata_from_result,
+        sanitize_answer,
+    )
+    from pydantic_ai import ModelMessagesTypeAdapter
+
+    # Capture the task ID in the main worker thread before run_sync hands off
+    # tool calls to a thread-pool executor. Celery stores self.request in a
+    # thread-local, so self.request.id is None inside executor threads.
+    task_id = self.request.id
+    step = 0
+    if task_id is not None:
+        self.update_state(
+            task_id=task_id,
+            state="PROGRESS",
+            meta={"step": 0, "tool": "", "message": "Processing your query..."},
+        )
+
+    def progress_callback(tool_name: str, message: str) -> None:
+        nonlocal step
+        step += 1
+        if task_id is not None:
+            self.update_state(
+                task_id=task_id,
+                state="PROGRESS",
+                meta={"step": step, "tool": tool_name, "message": message},
+            )
+
+    result = answer_with_agent(
+        prompt=query,
+        tree=tree,
+        include_private=include_private,
+        user_id=user_id,
+        history=history,
+        progress_callback=progress_callback,
+        message_history_raw=message_history_raw,
+    )
+
+    response_text = sanitize_answer(result.response.text or "")
+    response_dict: dict[str, Any] = {
+        "response": response_text,
+        "message_history_raw": ModelMessagesTypeAdapter.dump_json(
+            result.all_messages()
+        ).decode(),
+    }
+
+    if verbose:
+        response_dict["metadata"] = extract_metadata_from_result(result)
+
+    return response_dict

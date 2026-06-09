@@ -25,7 +25,7 @@ from tests.test_endpoints import BASE_URL, get_object_count, get_test_client
 
 from .checks import (
     check_boolean_parameter,
-    check_conforms_to_schema,
+    check_conforms_to_openapi_schema,
     check_invalid_semantics,
     check_invalid_syntax,
     check_keys_parameter,
@@ -57,7 +57,7 @@ class TestRepositories(unittest.TestCase):
 
     def test_get_repositories_conforms_to_schema(self):
         """Test conforms to schema."""
-        check_conforms_to_schema(
+        check_conforms_to_openapi_schema(
             self, TEST_URL + "?extend=all&profile=all&backlinks=1", "Repository"
         )
 
@@ -347,7 +347,7 @@ class TestRepositoriesHandle(unittest.TestCase):
 
     def test_get_repositories_handle_conforms_to_schema(self):
         """Test conforms to schema."""
-        check_conforms_to_schema(
+        check_conforms_to_openapi_schema(
             self,
             TEST_URL + "b39fe38593f3f8c4f12?extend=all&profile=all&backlinks=1",
             "Repository",
@@ -375,7 +375,7 @@ class TestRepositoriesHandle(unittest.TestCase):
 
     def test_get_repositories_handle_parameter_strip_expected_result(self):
         """Test strip parameter produces expected result."""
-        check_strip_parameter(self, TEST_URL + "b39fe38593f3f8c4f12")
+        check_strip_parameter(self, TEST_URL + "b39fe38593f3f8c4f12", paginate=False)
 
     def test_get_repositories_handle_parameter_keys_validate_semantics(self):
         """Test invalid keys parameter and values."""

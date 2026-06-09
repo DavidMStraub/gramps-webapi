@@ -5,18 +5,17 @@ authors = [
   { name = "Gramps Development Team" },
   { name = "David M. Straub", email = "straub@protonmail.com" }
 ]
-license = { text = "AGPL-3.0-or-later" }
+license = "AGPL-3.0-or-later"
 readme = "README.md"
 dynamic = ["version"]
 keywords = ["RESTful", "web API", "genealogy", "Gramps"]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
     "Operating System :: OS Independent",
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
-    "gramps[all]>=6.0.1,<6.1.0",
+    "gramps[all]>=6.0.4,<6.1.0",
     "PYGObject<=3.50.0",
     "orjson",
     "Click>=7.0",
@@ -32,24 +31,30 @@ dependencies = [
     "webargs",
     "SQLAlchemy>=2.0.0",
     "pdf2image",
-    "Pillow",
+    "Pillow>=9.1.0,<12.0.0",
     "bleach[css]>=5.0.0",
     "jsonschema",
     "ffmpeg-python",
-    "boto3<1.36.0",
+    "boto3",
     "alembic",
     "celery[redis]",
     "Unidecode",
     "pytesseract",
     "gramps-ql>=0.4.0",
     "object-ql>=0.1.3",
-    "sifts>=0.8.3",
+    "sifts>=1.1.0",
+    "requests",
+    "yclade>=0.5.0",
+    "Authlib>=1.6.4",
+    "gramps-gedcom7",
+    "flask-smorest",
+    "typing-extensions>=4.13.0",
 ]
 
 [project.optional-dependencies]
-ai = ["sentence-transformers==3.*", "openai", "accelerate"]
+ai = ["sentence-transformers>=4.1.0", "accelerate", "pydantic-ai[openai]>=1.101.0,<2.0.0"]
 test = ["pytest", "PyYAML"]
-all = ["sentence-transformers==3.*", "openai", "accelerate", "pytest", "PyYAML"]
+all = ["sentence-transformers>=4.1.0", "accelerate", "pydantic-ai[openai]>=1.101.0,<2.0.0", "pytest", "PyYAML"]
 
 [project.urls]
 homepage = "https://github.com/gramps-project/gramps-web-api"

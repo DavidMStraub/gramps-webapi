@@ -1,7 +1,7 @@
 #
 # Gramps Web API - A RESTful API for the Gramps genealogy program
 #
-# Copyright (C) 2020      Christopher Horn
+# Copyright (C) 2025      David Straub
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -17,24 +17,18 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 #
 
-"""Tests for the `gramps_webapi.api` module."""
+"""Dependencies for Pydantic AI agent."""
 
-import unittest
-
-import yaml
-from jsonschema import Draft4Validator, validate
-from pkg_resources import resource_filename
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
 
-class TestSchema(unittest.TestCase):
-    """Test cases to validate schema format."""
+@dataclass
+class AgentDeps:
+    """Dependencies for the Pydantic AI agent."""
 
-    def test_schema(self):
-        """Check schema for validity."""
-        # check it loads okay
-        with open(
-            resource_filename("gramps_webapi", "data/apispec.yaml")
-        ) as file_handle:
-            api_schema = yaml.safe_load(file_handle)
-        # check structure
-        Draft4Validator.check_schema(api_schema)
+    tree: str
+    include_private: bool
+    max_context_length: int
+    user_id: str
+    progress_callback: Callable[[str, str], None] | None = field(default=None)

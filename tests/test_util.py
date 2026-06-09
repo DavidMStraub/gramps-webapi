@@ -1,8 +1,51 @@
+from unittest.mock import MagicMock, patch
+
 import pytest
+from gramps.gen.lib import EventType
 from gramps.gen.lib.json_utils import data_to_object
 
 from gramps_webapi.api import util
+from gramps_webapi.api.resources.util import fix_object_dict
+from gramps_webapi.api.util import send_email
 from gramps_webapi.const import PRIMARY_GRAMPS_OBJECTS
+
+
+def test_fix_object_dict_localized_event_type():
+    """Test fix_object_dict with localized (German) event type string.
+
+    This tests the fix for localized type strings (e.g. German "Geburt").
+    Since _S2IMAP is built at module import time based on system locale,
+    we need to manually add the German string to simulate German locale.
+    """
+    event_dict = {"_class": "Event", "type": "Geburt"}
+    # Simulate German locale by adding German string to _S2IMAP
+    # _S2IMAP is built at import time; add German string for this test
+    had_geburt = "Geburt" in EventType._S2IMAP
+    old_geburt_value = EventType._S2IMAP.get("Geburt")
+    EventType._S2IMAP["Geburt"] = 12
+    try:
+        result = fix_object_dict(event_dict, "Event")
+        assert result["type"]["value"] == 12
+    finally:
+        if had_geburt:
+            EventType._S2IMAP["Geburt"] = old_geburt_value
+        else:
+            # Only remove the key if we introduced it
+            EventType._S2IMAP.pop("Geburt", None)
+
+
+def test_fix_object_dict_xml_event_type():
+    """Test fix_object_dict with English XML event type string."""
+    event_dict = {"_class": "Event", "type": "Birth"}
+    result = fix_object_dict(event_dict, "Event")
+    assert result["type"]["value"] == 12
+
+
+def test_fix_object_dict_custom_event_type():
+    """Test fix_object_dict with custom event type string."""
+    event_dict = {"_class": "Event", "type": "MyCustomEvent"}
+    result = fix_object_dict(event_dict, "Event")
+    assert result["type"]["value"] == 0
 
 
 def _test_complete_gramps_object_dict(obj_dict):
@@ -102,3 +145,181 @@ def test_complete_gramps_object_dict_non_gramps_dict():
     obj_dict = {"name": "Test", "value": 123}
     result = util.complete_gramps_object_dict(obj_dict.copy())
     assert result == obj_dict
+
+
+@pytest.fixture
+def mock_get_config():
+    """Mock get_config function."""
+    config = {
+        "EMAIL_HOST": "smtp.example.com",
+        "EMAIL_PORT": "587",
+        "EMAIL_HOST_USER": "user@example.com",
+        "EMAIL_HOST_PASSWORD": "password",
+        "DEFAULT_FROM_EMAIL": "noreply@example.com",
+        "EMAIL_USE_SSL": None,
+        "EMAIL_USE_STARTTLS": None,
+        "EMAIL_USE_TLS": True,
+    }
+
+    def get_config(key):
+        return config.get(key)
+
+    with patch("gramps_webapi.api.util.get_config", side_effect=get_config):
+        yield config
+
+
+@patch("gramps_webapi.api.util.smtplib.SMTP_SSL")
+@patch("gramps_webapi.api.util.smtplib.SMTP")
+def test_send_email_uses_smtp_ssl(mock_smtp, mock_smtp_ssl, mock_get_config):
+    """Test that EMAIL_USE_SSL=true uses SMTP_SSL."""
+    mock_get_config["EMAIL_USE_SSL"] = True
+    mock_get_config["EMAIL_PORT"] = "465"
+    mock_smtp_ssl.return_value = MagicMock()
+    with patch("gramps_webapi.api.util.current_app", MagicMock()):
+        send_email("Subject", "Body", ["test@example.com"])
+    mock_smtp_ssl.assert_called_once()
+    mock_smtp.assert_not_called()
+
+
+@patch("gramps_webapi.api.util.smtplib.SMTP_SSL")
+@patch("gramps_webapi.api.util.smtplib.SMTP")
+def test_send_email_uses_starttls(mock_smtp, mock_smtp_ssl, mock_get_config):
+    """Test that EMAIL_USE_STARTTLS=true uses SMTP with starttls."""
+    mock_get_config["EMAIL_USE_STARTTLS"] = True
+    mock_get_config["EMAIL_PORT"] = "587"
+    mock_smtp_instance = MagicMock()
+    mock_smtp.return_value = mock_smtp_instance
+    with patch("gramps_webapi.api.util.current_app", MagicMock()):
+        send_email("Subject", "Body", ["test@example.com"])
+    mock_smtp.assert_called_once()
+    mock_smtp_instance.starttls.assert_called_once()
+    mock_smtp_ssl.assert_not_called()
+
+
+@patch("gramps_webapi.api.util.smtplib.SMTP_SSL")
+@patch("gramps_webapi.api.util.smtplib.SMTP")
+def test_send_email_uses_plain_smtp(mock_smtp, mock_smtp_ssl, mock_get_config):
+    """Test that neither SSL nor STARTTLS uses plain SMTP."""
+    mock_get_config["EMAIL_USE_SSL"] = False
+    mock_get_config["EMAIL_USE_STARTTLS"] = False
+    mock_get_config["EMAIL_PORT"] = "25"
+    mock_smtp_instance = MagicMock()
+    mock_smtp.return_value = mock_smtp_instance
+    with patch("gramps_webapi.api.util.current_app", MagicMock()):
+        send_email("Subject", "Body", ["test@example.com"])
+    mock_smtp.assert_called_once()
+    mock_smtp_instance.starttls.assert_not_called()
+    mock_smtp_ssl.assert_not_called()
+
+
+@patch("gramps_webapi.api.util.smtplib.SMTP_SSL")
+@patch("gramps_webapi.api.util.smtplib.SMTP")
+def test_send_email_legacy_use_tls_true(mock_smtp, mock_smtp_ssl, mock_get_config):
+    """Test legacy EMAIL_USE_TLS=true uses SMTP_SSL."""
+    mock_get_config["EMAIL_USE_TLS"] = True
+    mock_get_config["EMAIL_PORT"] = "465"
+    mock_smtp_ssl.return_value = MagicMock()
+    mock_app = MagicMock()
+    with patch("gramps_webapi.api.util.current_app", mock_app):
+        send_email("Subject", "Body", ["test@example.com"])
+        mock_app.logger.warning.assert_called_once()
+    mock_smtp_ssl.assert_called_once()
+    mock_smtp.assert_not_called()
+
+
+@patch("gramps_webapi.api.util.smtplib.SMTP_SSL")
+@patch("gramps_webapi.api.util.smtplib.SMTP")
+def test_send_email_legacy_use_tls_false(mock_smtp, mock_smtp_ssl, mock_get_config):
+    """Test legacy EMAIL_USE_TLS=false uses STARTTLS on port 587."""
+    mock_get_config["EMAIL_USE_TLS"] = False
+    mock_get_config["EMAIL_PORT"] = "587"
+    mock_smtp_instance = MagicMock()
+    mock_smtp.return_value = mock_smtp_instance
+    with patch("gramps_webapi.api.util.current_app", MagicMock()):
+        send_email("Subject", "Body", ["test@example.com"])
+    mock_smtp.assert_called_once()
+    mock_smtp_instance.starttls.assert_called_once()
+    mock_smtp_ssl.assert_not_called()
+
+
+@patch("gramps_webapi.api.util.smtplib.SMTP_SSL")
+@patch("gramps_webapi.api.util.smtplib.SMTP")
+def test_send_email_ssl_false_starttls_true(mock_smtp, mock_smtp_ssl, mock_get_config):
+    """Test that EMAIL_USE_SSL=false doesn't prevent EMAIL_USE_STARTTLS=true from working."""
+    mock_get_config["EMAIL_USE_SSL"] = False
+    mock_get_config["EMAIL_USE_STARTTLS"] = True
+    mock_get_config["EMAIL_PORT"] = "587"
+    mock_smtp_instance = MagicMock()
+    mock_smtp.return_value = mock_smtp_instance
+    mock_app = MagicMock()
+    with patch("gramps_webapi.api.util.current_app", mock_app):
+        send_email("Subject", "Body", ["test@example.com"])
+        mock_app.logger.warning.assert_not_called()
+    mock_smtp.assert_called_once()
+    mock_smtp_instance.starttls.assert_called_once()
+    mock_smtp_ssl.assert_not_called()
+
+
+@patch("gramps_webapi.api.util.smtplib.SMTP_SSL")
+@patch("gramps_webapi.api.util.smtplib.SMTP")
+def test_send_email_legacy_use_tls_false_deprecation_warning(
+    mock_smtp, mock_smtp_ssl, mock_get_config
+):
+    """Test that legacy EMAIL_USE_TLS=false logs deprecation warning."""
+    mock_get_config["EMAIL_USE_TLS"] = False
+    mock_get_config["EMAIL_PORT"] = "587"
+    mock_smtp_instance = MagicMock()
+    mock_smtp.return_value = mock_smtp_instance
+    mock_app = MagicMock()
+    with patch("gramps_webapi.api.util.current_app", mock_app):
+        send_email("Subject", "Body", ["test@example.com"])
+        mock_app.logger.warning.assert_called_once()
+        warning_msg = mock_app.logger.warning.call_args[0][0]
+        assert "deprecated" in warning_msg.lower()
+    mock_smtp.assert_called_once()
+    mock_smtp_instance.starttls.assert_called_once()
+    mock_smtp_ssl.assert_not_called()
+
+
+def test_recalc_date_sortvals_fixes_stale_sortval():
+    """gramps-web-api#869: a client-supplied stale/zero sortval must be recomputed."""
+    from gramps.gen.lib import Date
+    from gramps.gen.lib.json_utils import object_to_dict
+
+    from gramps_webapi.api.util import gramps_object_from_dict, recalc_date_sortvals
+
+    date = Date()
+    date.set_yr_mon_day(1922, 5, 3)
+    correct = date.sortval
+    assert correct  # 2423178, computed by gramps
+
+    # an Event whose embedded Date arrives with a corrupted sortval
+    event = {
+        "_class": "Event",
+        "type": {"_class": "EventType", "value": 12, "string": "Birth"},
+        "date": object_to_dict(date),
+    }
+    event["date"]["sortval"] = 0
+    recalc_date_sortvals(event)
+    assert event["date"]["sortval"] == correct
+
+    # and end-to-end through the deserializer used by the write endpoints
+    event["date"]["sortval"] = 1
+    obj = gramps_object_from_dict(event)
+    assert obj.get_date_object().sortval == correct
+
+
+def test_recalc_date_sortvals_year_only():
+    """Year-only dates (no month/day) also get a correct sortval."""
+    from gramps.gen.lib import Date
+    from gramps.gen.lib.json_utils import object_to_dict
+
+    from gramps_webapi.api.util import recalc_date_sortvals
+
+    date = Date()
+    date.set_yr_mon_day(1827, 0, 0)
+    correct = date.sortval
+    date_dict = object_to_dict(date)
+    date_dict["sortval"] = 0
+    recalc_date_sortvals({"_class": "Event", "date": date_dict})
+    assert date_dict["sortval"] == correct

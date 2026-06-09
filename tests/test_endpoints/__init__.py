@@ -20,12 +20,7 @@
 """Tests for the `gramps_webapi.api` module."""
 
 import os
-import shutil
 from unittest.mock import patch
-
-import yaml
-from jsonschema import RefResolver
-from pkg_resources import resource_filename
 
 from gramps_webapi.api.search import get_search_indexer
 from gramps_webapi.app import create_app
@@ -40,11 +35,6 @@ from gramps_webapi.auth.const import (
 from gramps_webapi.const import ENV_CONFIG_FILE, TEST_EXAMPLE_GRAMPS_AUTH_CONFIG
 from gramps_webapi.dbmanager import WebDbManager
 from tests import TEST_GRAMPSHOME, ExampleDbSQLite
-
-with open(resource_filename("gramps_webapi", "data/apispec.yaml")) as file_handle:
-    API_SCHEMA = yaml.safe_load(file_handle)
-
-API_RESOLVER = RefResolver(base_uri="", referrer=API_SCHEMA, store={"": API_SCHEMA})
 
 BASE_URL = "/api"
 
@@ -67,9 +57,14 @@ def get_test_client():
     return TEST_CLIENT
 
 
+def get_single_tree_test_client():
+    """Return single-tree test client."""
+    return SINGLE_TREE_TEST_CLIENT
+
+
 def setUpModule():
     """Test module setup."""
-    global TEST_CLIENT, TEST_OBJECT_COUNTS
+    global TEST_CLIENT, TEST_OBJECT_COUNTS, SINGLE_TREE_TEST_CLIENT
 
     # create a database with the Gramps example tree
     test_db = ExampleDbSQLite(name="example_gramps")
@@ -83,7 +78,8 @@ def setUpModule():
                 "MEDIA_BASE_DIR": f"{os.environ['GRAMPS_RESOURCES']}/doc/gramps/example/gramps",
                 "VECTOR_EMBEDDING_MODEL": "paraphrase-albert-small-v2",
                 "LLM_MODEL": "mock-model",
-            }
+            },
+            config_from_env=False,
         )
     TEST_CLIENT = test_app.test_client()
     with test_app.app_context():
@@ -122,8 +118,24 @@ def setUpModule():
     }
     db_state.db.close()
 
-
-def tearDownModule():
-    """Test module tear down."""
-    if TEST_GRAMPSHOME and os.path.isdir(TEST_GRAMPSHOME):
-        shutil.rmtree(TEST_GRAMPSHOME)
+    # create a single-tree test client using the same example db
+    with patch.dict("os.environ", {ENV_CONFIG_FILE: TEST_EXAMPLE_GRAMPS_AUTH_CONFIG}):
+        single_tree_app = create_app(
+            config={
+                "TESTING": True,
+                "RATELIMIT_ENABLED": False,
+                "MEDIA_BASE_DIR": f"{os.environ['GRAMPS_RESOURCES']}/doc/gramps/example/gramps",
+                "TREE": test_db.name,
+            },
+            config_from_env=False,
+        )
+    SINGLE_TREE_TEST_CLIENT = single_tree_app.test_client()
+    with single_tree_app.app_context():
+        user_db.create_all()
+        for role, user in TEST_USERS.items():
+            add_user(
+                name=user["name"],
+                password=user["password"],
+                role=role,
+                tree=test_db.dirname,
+            )

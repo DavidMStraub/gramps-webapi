@@ -19,27 +19,41 @@
 
 """Constants for the web API."""
 
+import atexit
 import shutil
+from contextlib import ExitStack
+from importlib.resources import as_file, files
 
 import gramps.gen.lib as lib
 from gramps.gen.plug import CATEGORY_DRAW, CATEGORY_GRAPHVIZ, CATEGORY_TEXT
-from pkg_resources import resource_filename  # type: ignore[import-untyped]
 
 from ._version import __version__ as VERSION
 
 # the value of the TREE config option that enables multi-tree support
 TREE_MULTI = "*"
+TREE_CONFIG_MAX_BYTES = 64 * 1024  # 64 KB
 
-# files
-TEST_CONFIG = resource_filename("gramps_webapi", "data/test.cfg")
-TEST_AUTH_CONFIG = resource_filename("gramps_webapi", "data/test_auth.cfg")
-TEST_EXAMPLE_GRAMPS_CONFIG = resource_filename(
+# Helper function to get resource file paths with managed cleanup
+_file_manager = ExitStack()
+atexit.register(_file_manager.close)
+
+
+def _get_resource_path(package: str, resource_path: str) -> str:
+    """Get the file system path for a package resource with managed cleanup."""
+    ref = files(package) / resource_path
+    return str(_file_manager.enter_context(as_file(ref)))
+
+
+# Configuration files
+TEST_CONFIG = _get_resource_path("gramps_webapi", "data/test.cfg")
+TEST_AUTH_CONFIG = _get_resource_path("gramps_webapi", "data/test_auth.cfg")
+TEST_EXAMPLE_GRAMPS_CONFIG = _get_resource_path(
     "gramps_webapi", "data/example_gramps.cfg"
 )
-TEST_EXAMPLE_GRAMPS_AUTH_CONFIG = resource_filename(
+TEST_EXAMPLE_GRAMPS_AUTH_CONFIG = _get_resource_path(
     "gramps_webapi", "data/example_gramps_auth.cfg"
 )
-TEST_EMPTY_GRAMPS_AUTH_CONFIG = resource_filename(
+TEST_EMPTY_GRAMPS_AUTH_CONFIG = _get_resource_path(
     "gramps_webapi", "data/empty_gramps_auth.cfg"
 )
 
@@ -51,6 +65,7 @@ DB_CONFIG_ALLOWED_KEYS = [
     "EMAIL_HOST_PASSWORD",
     "DEFAULT_FROM_EMAIL",
     "BASE_URL",
+    "FRONTEND_URL",
 ]
 
 
@@ -64,6 +79,7 @@ API_PREFIX = "/api"
 SEX_MALE = "M"
 SEX_FEMALE = "F"
 SEX_UNKNOWN = "U"
+SEX_OTHER = "X"
 
 # Primary Gramps objects
 # This is used to identify the only ones that the keys and skipkeys
@@ -111,6 +127,7 @@ GRAMPS_NAMESPACES = {
 # MIME types
 MIME_PDF = "application/pdf"
 MIME_JPEG = "image/jpeg"
+MIME_AVIF = "image/avif"
 
 # Some platforms may not find all of these
 MIME_TYPES = {
@@ -123,6 +140,7 @@ MIME_TYPES = {
     ".ps": "application/postscript",
     ".svg": "image/svg+xml",
     ".svgz": "image/svg+xml",
+    ".avif": "image/avif",
     ".jpg": "image/jpeg",
     ".gif": "image/gif",
     ".png": "image/png",
@@ -195,3 +213,11 @@ DISABLED_IMPORTERS = ["gpkg"]
 
 # list of exporters (by file extension) that are not allowed
 DISABLED_EXPORTERS = ["gpkg"]
+
+# Settings for the opt-out telemetry
+TELEMETRY_ENDPOINT = "https://telemetry-cloud-run-442080026669.europe-west1.run.app"
+TELEMETRY_TIMESTAMP_KEY = "telemetry_last_sent"
+TELEMETRY_SERVER_ID_KEY = "telemetry_server_uuid"
+
+# Regular expression for allowed values of the `name_format` query parameter.
+NAME_FORMAT_REGEXP = r"^(%[%tTfFlLcCxXiImMyYoOrRpPqQsSnNgG]|%[0-2][mMyY]|[ \u0022\u0027,.:;\]\[\(\)\{\}\&\@])*$"

@@ -22,9 +22,9 @@
 import unittest
 from mimetypes import types_map
 
-from . import BASE_URL, get_test_client
+from . import BASE_URL, get_single_tree_test_client, get_test_client
 from .checks import (
-    check_conforms_to_schema,
+    check_conforms_to_openapi_schema,
     check_invalid_semantics,
     check_requires_token,
     check_resource_missing,
@@ -49,7 +49,7 @@ class TestExporters(unittest.TestCase):
 
     def test_get_exporters_conforms_to_schema(self):
         """Test conformity to schema."""
-        check_conforms_to_schema(self, TEST_URL, "Exporter")
+        check_conforms_to_openapi_schema(self, TEST_URL, "Exporter")
 
     def test_get_exporters_validate_semantics(self):
         """Test invalid parameters and values."""
@@ -70,7 +70,7 @@ class TestExportersExtension(unittest.TestCase):
 
     def test_get_exporters_extension_conforms_to_schema(self):
         """Test conformity to schema."""
-        check_conforms_to_schema(self, TEST_URL + "gramps", "Exporter")
+        check_conforms_to_openapi_schema(self, TEST_URL + "gramps", "Exporter")
 
     def test_get_exporters_extension_missing_content(self):
         """Test response for missing content."""
@@ -88,6 +88,7 @@ class TestExportersExtensionFile(unittest.TestCase):
     def setUpClass(cls):
         """Test class setup."""
         cls.client = get_test_client()
+        cls.single_tree_client = get_single_tree_test_client()
 
     def test_get_exporters_extension_file_requires_token(self):
         """Test authorization required."""
@@ -269,13 +270,13 @@ class TestExportersExtensionFile(unittest.TestCase):
 
     def test_get_exporters_extension_file_parameter_person_custom_filter(self):
         """Test person parameter custom filter."""
-        header = fetch_header(self.client)
+        header = fetch_header(self.single_tree_client)
         payload = {
             "comment": "Test person export custom filter",
             "name": "PersonExportCustomFilter",
             "rules": [{"name": "IsMale"}],
         }
-        rv = self.client.post(
+        rv = self.single_tree_client.post(
             BASE_URL + "/filters/people", json=payload, headers=header
         )
         self.assertEqual(rv.status_code, 201)
@@ -288,8 +289,8 @@ class TestExportersExtensionFile(unittest.TestCase):
             full=True,
         )
         self.assertNotIn(b"02NKQC5GOZFLSUSMW3", rv.data)
-        header = fetch_header(self.client)
-        rv = self.client.delete(
+        header = fetch_header(self.single_tree_client)
+        rv = self.single_tree_client.delete(
             BASE_URL + "/filters/people/PersonExportCustomFilter", headers=header
         )
         self.assertEqual(rv.status_code, 200)
@@ -303,13 +304,13 @@ class TestExportersExtensionFile(unittest.TestCase):
 
     def test_get_exporters_extension_file_parameter_event_custom_filter(self):
         """Test event parameter custom filter."""
-        header = fetch_header(self.client)
+        header = fetch_header(self.single_tree_client)
         payload = {
             "comment": "Test event export custom filter",
             "name": "EventExportCustomFilter",
             "rules": [{"name": "HasType", "values": ["Death"]}],
         }
-        rv = self.client.post(
+        rv = self.single_tree_client.post(
             BASE_URL + "/filters/events", json=payload, headers=header
         )
         self.assertEqual(rv.status_code, 201)
@@ -320,8 +321,8 @@ class TestExportersExtensionFile(unittest.TestCase):
             full=True,
         )
         self.assertNotIn(b"a5af0eb698f29568502", rv.data)
-        header = fetch_header(self.client)
-        rv = self.client.delete(
+        header = fetch_header(self.single_tree_client)
+        rv = self.single_tree_client.delete(
             BASE_URL + "/filters/events/EventExportCustomFilter", headers=header
         )
         self.assertEqual(rv.status_code, 200)
@@ -334,13 +335,15 @@ class TestExportersExtensionFile(unittest.TestCase):
 
     def test_get_exporters_extension_file_parameter_note_custom_filter(self):
         """Test note parameter custom filter."""
-        header = fetch_header(self.client)
+        header = fetch_header(self.single_tree_client)
         payload = {
             "comment": "Test note export custom filter",
             "name": "NoteExportCustomFilter",
             "rules": [{"name": "HasType", "values": ["Person Note"]}],
         }
-        rv = self.client.post(BASE_URL + "/filters/notes", json=payload, headers=header)
+        rv = self.single_tree_client.post(
+            BASE_URL + "/filters/notes", json=payload, headers=header
+        )
         self.assertEqual(rv.status_code, 201)
         rv = check_success(self, BASE_URL + "/filters/notes/NoteExportCustomFilter")
         rv = check_success(
@@ -349,8 +352,8 @@ class TestExportersExtensionFile(unittest.TestCase):
             full=True,
         )
         self.assertNotIn(b"ac380498bac48eedee8", rv.data)
-        header = fetch_header(self.client)
-        rv = self.client.delete(
+        header = fetch_header(self.single_tree_client)
+        rv = self.single_tree_client.delete(
             BASE_URL + "/filters/notes/NoteExportCustomFilter", headers=header
         )
         self.assertEqual(rv.status_code, 200)

@@ -26,14 +26,14 @@ from pathlib import Path
 from typing import Any, BinaryIO, Optional, Tuple, Union
 
 import pytesseract
-from flask import jsonify, make_response, send_file, send_from_directory
+from flask import jsonify, make_response, send_file, send_from_directory, current_app
 from gramps.gen.db.base import DbReadBase
 from gramps.gen.errors import HandleError
 from gramps.gen.lib import Media
 from PIL import Image
 from werkzeug.datastructures import FileStorage
 
-from gramps_webapi.const import MIME_JPEG
+from gramps_webapi.const import MIME_AVIF
 
 from ..types import FilenameOrPath
 from .image import LocalFileThumbnailHandler, detect_faces
@@ -89,6 +89,13 @@ class FileHandler:
     ):
         """Send thumbnail of cropped image."""
         raise NotImplementedError
+
+    def _abort_if_too_large(self) -> None:
+        """Abort with 413 if the file exceeds the thumbnail size limit."""
+        max_bytes = current_app.config.get("MAX_THUMBNAIL_FILE_BYTES")
+        assert max_bytes is not None  # for type checker
+        if self.get_file_size() > max_bytes:
+            abort_with_message(413, "File too large for thumbnailing")
 
     def get_face_regions(self, etag: Optional[str] = None):
         """Return regions containing faces."""
@@ -185,8 +192,8 @@ class LocalFileHandler(FileHandler):
         """
         try:
             self._check_path()
-        except ValueError:
-            abort_with_message(403, "File access not allowed")
+        except ValueError as exc:
+            raise FileNotFoundError from exc
         return os.path.getsize(self.path_abs)
 
     def send_file(
@@ -212,9 +219,10 @@ class LocalFileHandler(FileHandler):
             self._check_path()
         except ValueError:
             abort_with_message(403, "File access not allowed")
+        self._abort_if_too_large()
         thumb = LocalFileThumbnailHandler(self.path_abs, self.mime)
         buffer = thumb.get_cropped(x1=x1, y1=y1, x2=x2, y2=y2, square=square)
-        return send_file(buffer, mimetype=MIME_JPEG)
+        return send_file(buffer, mimetype=MIME_AVIF)
 
     def send_thumbnail(self, size: int, square: bool = False):
         """Send thumbnail of image."""
@@ -222,9 +230,10 @@ class LocalFileHandler(FileHandler):
             self._check_path()
         except ValueError:
             abort_with_message(403, "File access not allowed")
+        self._abort_if_too_large()
         thumb = LocalFileThumbnailHandler(self.path_abs, self.mime)
         buffer = thumb.get_thumbnail(size=size, square=square)
-        return send_file(buffer, mimetype=MIME_JPEG)
+        return send_file(buffer, mimetype=MIME_AVIF)
 
     def send_thumbnail_cropped(
         self, size: int, x1: int, y1: int, x2: int, y2: int, square: bool = False
@@ -234,11 +243,12 @@ class LocalFileHandler(FileHandler):
             self._check_path()
         except ValueError:
             abort_with_message(403, "File access not allowed")
+        self._abort_if_too_large()
         thumb = LocalFileThumbnailHandler(self.path_abs, self.mime)
         buffer = thumb.get_thumbnail_cropped(
             size=size, x1=x1, y1=y1, x2=x2, y2=y2, square=square
         )
-        return send_file(buffer, mimetype=MIME_JPEG)
+        return send_file(buffer, mimetype=MIME_AVIF)
 
 
 def upload_file_local(

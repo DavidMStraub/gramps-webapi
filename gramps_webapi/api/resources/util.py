@@ -1,7 +1,7 @@
 #
 # Gramps Web API - A RESTful API for the Gramps genealogy program
 #
-# Copyright (C) 2020      David Straub
+# Copyright (C) 2020-2025 David Straub
 # Copyright (C) 2020      Christopher Horn
 #
 # This program is free software; you can redistribute it and/or modify
@@ -22,7 +22,9 @@
 
 from __future__ import annotations
 
+import gzip
 import os
+import re
 from hashlib import sha256
 from http import HTTPStatus
 from typing import Any, Literal, Optional, Union, cast
@@ -32,11 +34,12 @@ import gramps.gen.lib
 import jsonschema
 from celery import Task
 from flask import Response, current_app, request
+from gramps.gen.config import config
 from gramps.gen.const import GRAMPS_LOCALE as glocale
 from gramps.gen.db import KEY_TO_CLASS_MAP, DbTxn
 from gramps.gen.db.base import DbReadBase, DbWriteBase
 from gramps.gen.db.dbconst import TXNADD, TXNDEL, TXNUPD
-from gramps.gen.db.utils import import_as_dict
+from gramps.gen.db.utils import make_database
 from gramps.gen.display.name import NameDisplay
 from gramps.gen.display.place import PlaceDisplay
 from gramps.gen.errors import HandleError
@@ -65,13 +68,15 @@ from gramps.gen.utils.db import (
     get_death_or_fallback,
     get_divorce_or_fallback,
     get_marriage_or_fallback,
-    get_participant_from_event,
 )
 from gramps.gen.utils.grampslocale import GrampsLocale
 from gramps.gen.utils.id import create_id
 from gramps.gen.utils.place import conv_lat_lon
+from gramps.gen.display.name import displayer as default_name_displayer
 
-from ...const import DISABLED_IMPORTERS, SEX_FEMALE, SEX_MALE, SEX_UNKNOWN
+import gramps_gedcom7
+
+from ...const import DISABLED_IMPORTERS, SEX_FEMALE, SEX_MALE, SEX_OTHER, SEX_UNKNOWN
 from ...types import FilenameOrPath, Handle, TransactionJson
 from ..media import get_media_handler
 from ..util import (
@@ -144,7 +149,126 @@ def get_sex_profile(person: Person) -> str:
         return SEX_MALE
     if person.gender == person.FEMALE:
         return SEX_FEMALE
+    if person.gender == person.OTHER:
+        return SEX_OTHER
     return SEX_UNKNOWN
+
+
+def get_family_name_localized(
+    family: Family, db_handle: DbReadBase, locale: GrampsLocale = glocale
+) -> str:
+    """
+    Get a localized family name for display.
+
+    This is a locale-aware version of gramps.gen.utils.db.family_name()
+    that properly translates the "and" connector based on the requested locale.
+
+    Args:
+        family: The Family object
+        db_handle: Database handle
+        locale: The locale to use for translation (default: server locale)
+
+    Returns:
+        A formatted family name string with proper locale translation
+    """
+    father = None
+    father_handle = family.get_father_handle()
+    if father_handle:
+        father = db_handle.get_person_from_handle(father_handle)
+
+    mother = None
+    mother_handle = family.get_mother_handle()
+    if mother_handle:
+        mother = db_handle.get_person_from_handle(mother_handle)
+
+    if father and mother:
+        fname = default_name_displayer.display(father)
+        mname = default_name_displayer.display(mother)
+        # Use the provided locale for translation instead of server default
+        return locale.translation.gettext("%(father)s and %(mother)s") % {
+            "father": fname,
+            "mother": mname,
+        }
+    if father:
+        return default_name_displayer.display(father)
+    if mother:
+        return default_name_displayer.display(mother)
+    return locale.translation.gettext("unknown")
+
+
+def get_participant_from_event_localized(
+    db_handle: DbReadBase,
+    event_handle: Handle,
+    locale: GrampsLocale = glocale,
+    all_: bool = False,
+) -> str:
+    """
+    Get the participant name(s) from an event with proper locale translation.
+
+    This is a locale-aware version of gramps.gen.utils.db.get_participant_from_event()
+    that properly translates family names based on the requested locale.
+
+    Args:
+        db_handle: Database handle
+        event_handle: Handle of the event
+        locale: The locale to use for translation (default: server locale)
+        all_: If True, return all participants; if False, add ellipsis for multiple
+
+    Returns:
+        A formatted string of participant name(s)
+    """
+    participant = ""
+    ellipses = False
+    result_list = list(
+        db_handle.find_backlink_handles(
+            event_handle, include_classes=["Person", "Family"]
+        )
+    )
+
+    # obtain handles without duplicates
+    people = set([x[1] for x in result_list if x[0] == "Person"])
+    families = set([x[1] for x in result_list if x[0] == "Family"])
+
+    for person_handle in people:
+        person = db_handle.get_person_from_handle(person_handle)
+        if not person:
+            continue
+        for event_ref in person.get_event_ref_list():
+            if event_handle == event_ref.ref and event_ref.get_role().is_primary():
+                if participant:
+                    if all_:
+                        participant += f", {default_name_displayer.display(person)}"
+                    else:
+                        ellipses = True
+                else:
+                    participant = default_name_displayer.display(person)
+                break
+        if ellipses:
+            break
+
+    if ellipses:
+        return locale.translation.gettext("%s, ...") % participant
+
+    for family_handle in families:
+        family = db_handle.get_family_from_handle(family_handle)
+        for event_ref in family.get_event_ref_list():
+            if event_handle == event_ref.ref and event_ref.get_role().is_family():
+                if participant:
+                    if all_:
+                        participant += (
+                            f", {get_family_name_localized(family, db_handle, locale)}"
+                        )
+                    else:
+                        ellipses = True
+                else:
+                    participant = get_family_name_localized(family, db_handle, locale)
+                break
+        if ellipses:
+            break
+
+    if ellipses:
+        return locale.translation.gettext("%s, ...") % participant
+    return participant
 
 
 def get_event_participants_for_handle(
@@ -167,7 +291,10 @@ def get_event_participants_for_handle(
             continue
         seen.add(backref_handle)
         if class_name == "Person":
-            person = db_handle.get_person_from_handle(backref_handle)
+            try:
+                person = db_handle.get_person_from_handle(backref_handle)
+            except HandleError:
+                continue
             if not person:
                 continue
             for event_ref in person.get_event_ref_list():
@@ -175,11 +302,14 @@ def get_event_participants_for_handle(
                     result["people"].append(
                         (
                             event_ref.get_role(),
-                            db_handle.get_person_from_handle(backref_handle),
+                            person,
                         )
                     )
         elif class_name == "Family":
-            family = db_handle.get_family_from_handle(backref_handle)
+            try:
+                family = db_handle.get_family_from_handle(backref_handle)
+            except HandleError:
+                continue
             if not family:
                 continue
             for event_ref in family.get_event_ref_list():
@@ -187,7 +317,7 @@ def get_event_participants_for_handle(
                     result["families"].append(
                         (
                             event_ref.get_role(),
-                            db_handle.get_family_from_handle(backref_handle),
+                            family,
                         )
                     )
     return result
@@ -197,6 +327,7 @@ def get_event_participants_profile_for_handle(
     db_handle: DbReadBase,
     handle: Handle,
     locale: GrampsLocale = glocale,
+    name_format: Optional[str] = None,
 ) -> dict:
     """Get event participants given a handle."""
     event_participants = get_event_participants_for_handle(
@@ -208,13 +339,21 @@ def get_event_participants_profile_for_handle(
 
     for role, person in event_participants["people"]:
         person_profile = get_person_profile_for_object(
-            db_handle, cast(Person, person), args=[], locale=locale
+            db_handle,
+            cast(Person, person),
+            args=[],
+            locale=locale,
+            name_format=name_format,
         )
         role_str = locale.translation.sgettext(role.xml_str())
         result["people"].append({"role": role_str, "person": person_profile})
     for role, family in event_participants["families"]:
         person_profile = get_family_profile_for_object(
-            db_handle, cast(Family, family), args=[], locale=locale
+            db_handle,
+            cast(Family, family),
+            args=[],
+            locale=locale,
+            name_format=name_format,
         )
         role_str = locale.translation.sgettext(role.xml_str())
         result["families"].append({"role": role_str, "family": person_profile})
@@ -226,7 +365,11 @@ def get_event_summary_from_object(
 ):
     """Get a summary of an Event."""
     handle = event.get_handle()
-    participant = get_participant_from_event(db_handle, handle)
+    try:
+        participant = get_participant_from_event_localized(db_handle, handle, locale)
+    except HandleError:
+        # Bad handle in database - return event type only
+        participant = ""
     event_type = locale.translation.sgettext(event.type.xml_str())
     if not participant:
         return event_type
@@ -241,19 +384,25 @@ def get_event_profile_for_object(
     label: str = "span",
     locale: GrampsLocale = glocale,
     role: Optional[str] = None,
+    name_format: Optional[str] = None,
+    precision: int = 3,
 ) -> dict:
     """Get event profile given an Event."""
     result = {
         "type": locale.translation.sgettext(event.type.xml_str()),
         "date": locale.date_displayer.display(event.date),
         "place": pd.display_event(db_handle, event),
+        "place_name": get_place_name_for_event(db_handle, event),
         "summary": get_event_summary_from_object(db_handle, event, locale=locale),
     }
     if role is not None:
         result["role"] = role
     if "all" in args or "participants" in args:
         result["participants"] = get_event_participants_profile_for_handle(
-            db_handle, event.handle, locale=locale
+            db_handle,
+            event.handle,
+            locale=locale,
+            name_format=name_format,
         )
     if "all" in args or "ratings" in args:
         count, confidence = get_rating(db_handle, event)
@@ -262,10 +411,27 @@ def get_event_profile_for_object(
     if base_event is not None:
         result[label] = (
             Span(base_event.date, event.date)
-            .format(precision=3, dlocale=locale)
+            .format(precision=precision, dlocale=locale)
             .strip("()")
         )
     return result
+
+
+def get_place_name_for_event(db_handle: DbReadBase, event: Event) -> str:
+    """Get place name for an event."""
+    place_handle = event.get_place_handle()
+    if not place_handle:
+        return ""
+    try:
+        place: Place = db_handle.get_place_from_handle(place_handle)
+    except HandleError:
+        return ""
+    if not place:
+        return ""
+    place_name = place.get_name()
+    if not place_name:
+        return ""
+    return place_name.value
 
 
 def get_event_profile_for_handle(
@@ -276,6 +442,8 @@ def get_event_profile_for_handle(
     label: str = "span",
     locale: GrampsLocale = glocale,
     role: Optional[str] = None,
+    name_format: Optional[str] = None,
+    precision: int = 3,
 ) -> dict:
     """Get event profile given a handle."""
     try:
@@ -292,6 +460,8 @@ def get_event_profile_for_handle(
         label=label,
         locale=locale,
         role=role,
+        name_format=name_format,
+        precision=precision,
     )
 
 
@@ -300,6 +470,7 @@ def get_birth_profile(
     person: Person,
     args: Union[list, None] = None,
     locale: GrampsLocale = glocale,
+    name_format: str | None = None,
 ) -> tuple[dict, Union[Event, None]]:
     """Return best available birth information for a person."""
     event = get_birth_or_fallback(db_handle, person)
@@ -307,7 +478,9 @@ def get_birth_profile(
         return {}, None
     args = args or []
     return (
-        get_event_profile_for_object(db_handle, event, args=args, locale=locale),
+        get_event_profile_for_object(
+            db_handle, event, args=args, locale=locale, name_format=name_format
+        ),
         event,
     )
 
@@ -317,6 +490,7 @@ def get_death_profile(
     person: Person,
     args: Union[list, None] = None,
     locale: GrampsLocale = glocale,
+    name_format: str | None = None,
 ) -> tuple[dict, Union[Event, None]]:
     """Return best available death information for a person."""
     event = get_death_or_fallback(db_handle, person)
@@ -324,7 +498,9 @@ def get_death_profile(
         return {}, None
     args = args or []
     return (
-        get_event_profile_for_object(db_handle, event, args=args, locale=locale),
+        get_event_profile_for_object(
+            db_handle, event, args=args, locale=locale, name_format=name_format
+        ),
         event,
     )
 
@@ -334,6 +510,7 @@ def get_marriage_profile(
     family: Family,
     args: Union[list, None] = None,
     locale: GrampsLocale = glocale,
+    name_format: str | None = None,
 ) -> tuple[dict, Union[Event, None]]:
     """Return best available marriage information for a couple."""
     event = get_marriage_or_fallback(db_handle, family)
@@ -341,7 +518,9 @@ def get_marriage_profile(
         return {}, None
     args = args or []
     return (
-        get_event_profile_for_object(db_handle, event, args=args, locale=locale),
+        get_event_profile_for_object(
+            db_handle, event, args=args, locale=locale, name_format=name_format
+        ),
         event,
     )
 
@@ -351,6 +530,7 @@ def get_divorce_profile(
     family: Family,
     args: list | None = None,
     locale: GrampsLocale = glocale,
+    name_format: str | None = None,
 ) -> tuple[dict, Event | None]:
     """Return best available divorce information for a couple."""
     event = get_divorce_or_fallback(db_handle, family)
@@ -358,7 +538,9 @@ def get_divorce_profile(
         return {}, None
     args = args or []
     return (
-        get_event_profile_for_object(db_handle, event, args=args, locale=locale),
+        get_event_profile_for_object(
+            db_handle, event, args=args, locale=locale, name_format=name_format
+        ),
         event,
     )
 
@@ -405,19 +587,53 @@ def get_place_profile_for_object(
                 break
             if handle is None or handle in parent_places_handles:
                 break
-            _place = db_handle.get_place_from_handle(handle)
+            _place = None
+            try:
+                _place = db_handle.get_place_from_handle(handle)
+            except HandleError:
+                break
             if _place is None:
                 break
             parent_places_handles.append(handle)
-        profile["parent_places"] = [
-            get_place_profile_for_object(
-                db_handle=db_handle,
-                place=db_handle.get_place_from_handle(parent_place),
-                locale=locale,
-                parent_places=False,
-            )
-            for parent_place in parent_places_handles
-        ]
+
+        parent_places_value = []
+        for parent_place in parent_places_handles:
+            try:
+                place_value = db_handle.get_place_from_handle(parent_place)
+                if place_value is None:
+                    continue
+                parent_places_value.append(
+                    get_place_profile_for_object(
+                        db_handle=db_handle,
+                        place=place_value,
+                        locale=locale,
+                        parent_places=False,
+                    )
+                )
+            except HandleError:
+                continue
+        profile["parent_places"] = parent_places_value
+
+        direct_parent_places_value = []
+        for place_ref in place.get_placeref_list():
+            try:
+                place_value = db_handle.get_place_from_handle(place_ref.ref)
+                if place_value is None:
+                    continue
+                direct_parent_places_value.append(
+                    {
+                        "place": get_place_profile_for_object(
+                            db_handle=db_handle,
+                            place=place_value,
+                            locale=locale,
+                            parent_places=False,
+                        ),
+                        "date_str": locale.date_displayer.display(place_ref.date),
+                    }
+                )
+            except HandleError:
+                continue
+        profile["direct_parent_places"] = direct_parent_places_value
     return profile
 
 
@@ -435,13 +651,17 @@ def get_place_profile_for_handle(
 
 
 def get_person_profile_for_object(
-    db_handle: DbReadBase, person: Person, args: list, locale: GrampsLocale = glocale
-) -> Person:
+    db_handle: DbReadBase,
+    person: Person,
+    args: list,
+    locale: GrampsLocale = glocale,
+    name_format: str | None = None,
+    precision: int = 3,
+) -> dict[str, Any]:
     """Get person profile given a Person."""
     options = []
     if "all" in args or "ratings" in args:
         options.append("ratings")
-    name_display = NameDisplay(xlocale=locale)
     birth, birth_event = get_birth_profile(
         db_handle, person, args=options, locale=locale
     )
@@ -457,17 +677,26 @@ def get_person_profile_for_object(
             if death_event is not None:
                 death["age"] = (
                     Span(birth_event.date, death_event.date)
-                    .format(precision=3, dlocale=locale)
+                    .format(precision=precision, dlocale=locale)
                     .strip("()")
                 )
+    name_displayer = NameDisplay(xlocale=locale)
+    name_displayer.set_name_format(db_handle.name_formats)
+    fmt_default = config.get("preferences.name-format")
+    name_displayer.set_default_format(fmt_default)
     profile = {
         "handle": person.handle,
         "gramps_id": person.gramps_id,
         "sex": get_sex_profile(person),
         "birth": birth,
         "death": death,
-        "name_given": name_display.display_given(person),
+        "name_given": name_displayer.display_given(person),
         "name_surname": person.primary_name.get_surname(),
+        "name_display": (
+            name_displayer.format_str(person.get_primary_name(), name_format)
+            if name_format
+            else name_displayer.display(person)
+        ),
         "name_suffix": person.primary_name.get_suffix(),
     }
     if "all" in args or "span" in args:
@@ -485,32 +714,56 @@ def get_person_profile_for_object(
                 label="age",
                 locale=locale,
                 role=locale.translation.sgettext(event_ref.get_role().xml_str()),
+                name_format=name_format,
+                precision=precision,
             )
             for event_ref in person.event_ref_list
         ]
     if "all" in args or "families" in args:
         primary_parent_family_handle = person.get_main_parents_family_handle()
         profile["primary_parent_family"] = get_family_profile_for_handle(
-            db_handle, primary_parent_family_handle, options, locale=locale
+            db_handle,
+            primary_parent_family_handle,
+            options,
+            locale=locale,
+            name_format=name_format,
+            precision=precision,
         )
         profile["other_parent_families"] = []
         for handle in person.parent_family_list:
             if handle != primary_parent_family_handle:
                 profile["other_parent_families"].append(
                     get_family_profile_for_handle(
-                        db_handle, handle, options, locale=locale
+                        db_handle,
+                        handle,
+                        options,
+                        locale=locale,
+                        name_format=name_format,
+                        precision=precision,
                     )
                 )
         profile["families"] = [
-            get_family_profile_for_handle(db_handle, handle, options, locale=locale)
+            get_family_profile_for_handle(
+                db_handle,
+                handle,
+                options,
+                locale=locale,
+                name_format=name_format,
+                precision=precision,
+            )
             for handle in person.family_list
         ]
     return profile
 
 
 def get_person_profile_for_handle(
-    db_handle: DbReadBase, handle: Handle, args: list, locale: GrampsLocale = glocale
-) -> Union[Person, dict]:
+    db_handle: DbReadBase,
+    handle: Handle,
+    args: list,
+    locale: GrampsLocale = glocale,
+    name_format: str | None = None,
+    precision: int = 3,
+) -> dict[str, Any]:
     """Get person profile given a handle."""
     try:
         obj = db_handle.get_person_from_handle(handle)
@@ -518,7 +771,14 @@ def get_person_profile_for_handle(
             return {}
     except HandleError:
         return {}
-    return get_person_profile_for_object(db_handle, obj, args, locale=locale)
+    return get_person_profile_for_object(
+        db_handle,
+        obj,
+        args,
+        locale=locale,
+        name_format=name_format,
+        precision=precision,
+    )
 
 
 def get_family_profile_for_object(
@@ -526,7 +786,9 @@ def get_family_profile_for_object(
     family: Family,
     args: list[str],
     locale: GrampsLocale = glocale,
-) -> Family:
+    name_format: Optional[str] = None,
+    precision: int = 3,
+) -> dict[str, Any]:
     """Get family profile given a Family."""
     options = []
     if "all" in args or "ratings" in args:
@@ -545,7 +807,7 @@ def get_family_profile_for_object(
             if divorce_event is not None:
                 divorce["span"] = (
                     Span(marriage_event.date, divorce_event.date)
-                    .format(precision=3, dlocale=locale)
+                    .format(precision=precision, dlocale=locale)
                     .strip("()")
                 )
     if "all" in args or "age" in args:
@@ -554,17 +816,32 @@ def get_family_profile_for_object(
         "handle": family.handle,
         "gramps_id": family.gramps_id,
         "father": get_person_profile_for_handle(
-            db_handle, family.father_handle, options, locale=locale
+            db_handle,
+            family.father_handle,
+            options,
+            locale=locale,
+            name_format=name_format,
+            precision=precision,
         ),
         "mother": get_person_profile_for_handle(
-            db_handle, family.mother_handle, options, locale=locale
+            db_handle,
+            family.mother_handle,
+            options,
+            locale=locale,
+            name_format=name_format,
+            precision=precision,
         ),
         "relationship": locale.translation.sgettext(family.type.xml_str()),
         "marriage": marriage,
         "divorce": divorce,
         "children": [
             get_person_profile_for_handle(
-                db_handle, child_ref.ref, options, locale=locale
+                db_handle,
+                child_ref.ref,
+                options,
+                locale=locale,
+                name_format=name_format,
+                precision=precision,
             )
             for child_ref in family.child_ref_list
         ],
@@ -589,6 +866,8 @@ def get_family_profile_for_object(
                 base_event=marriage_event,
                 label="span",
                 locale=locale,
+                name_format=name_format,
+                precision=precision,
             )
             for event_ref in family.event_ref_list
         ]
@@ -596,8 +875,13 @@ def get_family_profile_for_object(
 
 
 def get_family_profile_for_handle(
-    db_handle: DbReadBase, handle: Handle, args: list, locale: GrampsLocale = glocale
-) -> Union[Family, dict]:
+    db_handle: DbReadBase,
+    handle: Handle,
+    args: list,
+    locale: GrampsLocale = glocale,
+    name_format: Optional[str] = None,
+    precision: int = 3,
+) -> dict[str, Any]:
     """Get family profile given a handle."""
     try:
         obj = db_handle.get_family_from_handle(handle)
@@ -605,7 +889,14 @@ def get_family_profile_for_handle(
             return {}
     except HandleError:
         return {}
-    return get_family_profile_for_object(db_handle, obj, args, locale=locale)
+    return get_family_profile_for_object(
+        db_handle,
+        obj,
+        args,
+        locale=locale,
+        name_format=name_format,
+        precision=precision,
+    )
 
 
 def get_citation_profile_for_object(
@@ -718,6 +1009,11 @@ def get_extended_attributes(
             catch_handle_error(db_handle.get_person_from_handle, person_ref.ref)
             for person_ref in obj.person_ref_list
         ]
+    if (do_all or "placeref_list" in args["extend"]) and hasattr(obj, "placeref_list"):
+        result["places"] = [
+            catch_handle_error(db_handle.get_place_from_handle, place_ref.ref)
+            for place_ref in obj.placeref_list
+        ]
     if (do_all or "reporef_list" in args["extend"]) and hasattr(obj, "reporef_list"):
         result["repositories"] = [
             catch_handle_error(db_handle.get_repository_from_handle, repo_ref.ref)
@@ -760,10 +1056,13 @@ def get_soundex(
 ) -> str:
     """Return soundex code."""
     if gramps_class_name == "Family":
+        person = None
         if obj.father_handle is not None:
             person = db_handle.get_person_from_handle(obj.father_handle)
-        elif obj.mother_handle is not None:
+        if person is None and obj.mother_handle is not None:
             person = db_handle.get_person_from_handle(obj.mother_handle)
+        if person is None:
+            return ""
     else:
         person = obj
     return soundex(person.get_primary_name().get_surname())
@@ -773,6 +1072,7 @@ def get_reference_profile_for_object(
     db_handle: DbReadBase,
     obj: GrampsObject,
     locale: GrampsLocale = glocale,
+    name_format: Optional[str] = None,
 ) -> dict:
     """Return reference profiles for an object."""
     profile = {}
@@ -784,17 +1084,35 @@ def get_reference_profile_for_object(
         backlink_handles = get_backlinks(db_handle, obj.handle)
     if "person" in backlink_handles:
         profile["person"] = [
-            get_person_profile_for_handle(db_handle, handle, args=[], locale=locale)
+            get_person_profile_for_handle(
+                db_handle,
+                handle,
+                args=[],
+                locale=locale,
+                name_format=name_format,
+            )
             for handle in backlink_handles["person"]
         ]
     if "family" in backlink_handles:
         profile["family"] = [
-            get_family_profile_for_handle(db_handle, handle, args=[], locale=locale)
+            get_family_profile_for_handle(
+                db_handle,
+                handle,
+                args=[],
+                locale=locale,
+                name_format=name_format,
+            )
             for handle in backlink_handles["family"]
         ]
     if "event" in backlink_handles:
         profile["event"] = [
-            get_event_profile_for_handle(db_handle, handle, args=[], locale=locale)
+            get_event_profile_for_handle(
+                db_handle,
+                handle,
+                args=[],
+                locale=locale,
+                name_format=name_format,
+            )
             for handle in backlink_handles["event"]
         ]
     if "media" in backlink_handles:
@@ -919,6 +1237,19 @@ def validate_object_dict(obj_dict: dict[str, Any]) -> bool:
     except (KeyError, AttributeError, TypeError):
         return False
     schema = obj_cls.get_schema()
+
+    # Gramps 5.2 added Person.OTHER = 3, but the JSON schema still caps gender
+    # at 2. Patch the schema to allow the actual maximum value.
+    # This patch can be removed once https://github.com/gramps-project/gramps/pull/2213
+    # is merged and a new Gramps version is released.
+    other = getattr(obj_cls, "OTHER", None)
+    if (
+        other is not None
+        and schema.get("properties", {}).get("gender", {}).get("maximum") is not None
+        and other > schema["properties"]["gender"]["maximum"]
+    ):
+        schema["properties"]["gender"]["maximum"] = other
+
     obj_dict_fixed = {k: v for k, v in obj_dict.items() if k != "complete"}
     try:
         jsonschema.validate(obj_dict_fixed, schema)
@@ -934,6 +1265,24 @@ def xml_to_locale(gramps_type_name: str, string: str) -> str:
     typ = gramps_type()
     typ.set_from_xml_str(string)
     return str(typ)
+
+
+def _set_type_from_string(type_obj, string_value: str) -> None:
+    """Set a GrampsType from either an XML (English) or localized string.
+
+    The frontend may send either English XML strings (e.g. "Birth") or
+    localized strings (e.g. "Geburt" in German), depending on the
+    ``valueNonLocal`` property of ``GrampsjsFormSelectType``.
+
+    This function first tries ``set_from_xml_str()`` which handles English
+    XML strings via ``_E2IMAP``. If the string is not recognized (i.e. falls
+    back to Custom), it tries ``set()`` which handles localized strings via
+    ``_S2IMAP``.
+    """
+    type_obj.set_from_xml_str(string_value)
+    if type_obj.is_custom() and string_value not in type_obj._E2IMAP:
+        # set_from_xml_str didn't recognize it — try localized string
+        type_obj.set(string_value)
 
 
 def fix_object_dict(object_dict: dict, class_name: Optional[str] = None):
@@ -958,17 +1307,17 @@ def fix_object_dict(object_dict: dict, class_name: Optional[str] = None):
                 if class_name == "Family":
                     _class = "FamilyRelType"
                     obj = gramps.gen.lib.__dict__[_class]()
-                    obj.set_from_xml_str(v)
+                    _set_type_from_string(obj, v)
                     d_out[k] = object_to_dict(obj)
                 elif class_name == "RepoRef":
                     _class = "SourceMediaType"
                     obj = gramps.gen.lib.__dict__[_class]()
-                    obj.set_from_xml_str(v)
+                    _set_type_from_string(obj, v)
                     d_out[k] = object_to_dict(obj)
                 else:
                     _class = f"{class_name}Type"
                     obj = gramps.gen.lib.__dict__[_class]()
-                    obj.set_from_xml_str(v)
+                    _set_type_from_string(obj, v)
                     d_out[k] = object_to_dict(obj)
             else:
                 d_out[k] = v
@@ -976,7 +1325,7 @@ def fix_object_dict(object_dict: dict, class_name: Optional[str] = None):
             if isinstance(v, str):
                 _class = "EventRoleType"
                 obj = gramps.gen.lib.__dict__[_class]()
-                obj.set_from_xml_str(v)
+                _set_type_from_string(obj, v)
                 d_out[k] = object_to_dict(obj)
             else:
                 d_out[k] = v
@@ -984,7 +1333,7 @@ def fix_object_dict(object_dict: dict, class_name: Optional[str] = None):
             if isinstance(v, str):
                 _class = "NameOriginType"
                 obj = gramps.gen.lib.__dict__[_class]()
-                obj.set_from_xml_str(v)
+                _set_type_from_string(obj, v)
                 d_out[k] = object_to_dict(obj)
             else:
                 d_out[k] = v
@@ -1073,7 +1422,7 @@ def update_object(
     obj_class = obj.__class__.__name__.lower()
     if not has_handle(db_handle, obj):
         raise ValueError("Cannot be used for new objects.")
-    if not obj.gramps_id:
+    if hasattr(obj, "gramps_id") and not obj.gramps_id:
         # if the Gramps ID is empty, set it to the old one!
         handle_func = db_handle.method("get_%s_from_handle", obj_class)
         obj_old = handle_func(obj.handle)
@@ -1088,6 +1437,42 @@ def update_object(
             )
         elif obj_class == "person":
             db_handle.set_birth_death_index(obj)
+        elif obj_class == "event":
+            # When an event type changes (e.g. Death → Birth), the birth_ref_index
+            # and death_ref_index on all referring persons must be recomputed.
+            # Fetch the old event to decide whether a birth/death-relevant type
+            # change has occurred before paying the cost of scanning backlinks.
+            old_event = db_handle.get_event_from_handle(obj.handle)
+            old_type = old_event.get_type()
+            new_type = obj.get_type()
+            type_affects_indices = old_type != new_type and (
+                old_type.is_birth()
+                or old_type.is_death()
+                or new_type.is_birth()
+                or new_type.is_death()
+            )
+            # Commit the event first so that set_birth_death_index reads the new type.
+            result = commit_method(obj, trans)
+            if type_affects_indices:
+                for _, person_handle in db_handle.find_backlink_handles(
+                    obj.handle, include_classes=["Person"]
+                ):
+                    try:
+                        person = db_handle.get_person_from_handle(person_handle)
+                    except HandleError:
+                        # Stale backlink or concurrently deleted person; skip.
+                        continue
+                    if person is None:
+                        continue
+                    old_birth = person.birth_ref_index
+                    old_death = person.death_ref_index
+                    db_handle.set_birth_death_index(person)
+                    if (
+                        person.birth_ref_index != old_birth
+                        or person.death_ref_index != old_death
+                    ):
+                        db_handle.commit_person(person, trans)
+            return result
         return commit_method(obj, trans)
     except AttributeError as exc:
         raise ValueError("Database does not support writing.") from exc
@@ -1246,14 +1631,117 @@ def get_importers(extension: str | None = None):
     return importers
 
 
+def detect_gedcom_major_version(path: str) -> int:
+    """Detect the GEDCOM version from a GEDCOM file.
+
+    Args:
+        path: Path to the GEDCOM file.
+
+    Returns:
+        The major version number (e.g., 5 or 7). Returns 0 if not found.
+
+    This function parses the GEDCOM file header looking for the VERS tag
+    within the HEAD section. It uses latin-1 encoding which is compatible
+    with both GEDCOM 5.x (ANSEL) and GEDCOM 7.x (UTF-8) files.
+    """
+    with open(path, encoding="latin-1") as f:
+        in_head = False
+        for line in f:
+            parts = line.strip().split(maxsplit=2)
+            if len(parts) < 2:
+                continue
+
+            level, tag = parts[0], parts[1]
+
+            if level == "0":
+                if tag == "HEAD":
+                    in_head = True
+                elif in_head:
+                    break
+
+            elif in_head and tag == "VERS" and len(parts) == 3:
+                version = parts[2]
+                match = re.search(r"\d+", version)
+                gedcom_major_version = int(match.group()) if match else 0
+                return gedcom_major_version
+
+    return 0
+
+
+def remove_mediapath_from_gramps_xml(file_name: FilenameOrPath) -> None:
+    """Remove the <mediapath> tag from a Gramps XML file.
+
+    This function handles both compressed (.gramps with gzip) and uncompressed
+    Gramps XML files. The <mediapath> tag can cause import failures and needs
+    to be removed before import.
+
+    Args:
+        file_name: Path to the Gramps XML file.
+    """
+    # Try to read as gzipped file first
+    try:
+        with gzip.open(file_name, "rb") as f:
+            content = f.read()
+        is_compressed = True
+    except (OSError, gzip.BadGzipFile):
+        # Not gzipped or can't read as gzip: fall back to plain file
+        with open(file_name, "rb") as f:
+            content = f.read()
+        is_compressed = False
+
+    # Remove the mediapath tag using regex
+    # Match <mediapath>...</mediapath> or <mediapath/> (empty tag)
+    # The pattern handles both multiline and single-line cases
+    pattern = rb"<mediapath\s*>.*?</mediapath\s*>|<mediapath\s*/>"
+    content_modified = re.sub(pattern, b"", content, flags=re.DOTALL)
+
+    # Write back to the file
+    if is_compressed:
+        with gzip.open(file_name, "wb") as f:
+            f.write(content_modified)
+    else:
+        with open(file_name, "wb") as f:
+            f.write(content_modified)
+
+
 def run_import(
-    db_handle: DbReadBase,
+    db_handle: DbWriteBase,
     file_name: FilenameOrPath,
     extension: str,
     delete: bool = True,
     task: Optional[Task] = None,
 ) -> None:
     """Import a file."""
+    if extension.lower() == "ged" and detect_gedcom_major_version(str(file_name)) == 7:
+        try:
+            gramps_gedcom7.import_gedcom(input_file=file_name, db=db_handle)
+        except ValueError as e:
+            # ValueError indicates invalid file format or encoding (e.g., not UTF-8)
+            abort_with_message(422, f"Invalid GEDCOM file: {e}")
+        except Exception as e:
+            # Unexpected errors - log for debugging
+            current_app.logger.exception("GEDCOM7 import failed with unexpected error")
+            abort_with_message(500, f"Import failed: {e}")
+        finally:
+            if delete:
+                try:
+                    os.remove(file_name)
+                except OSError as e:
+                    # Log but don't let cleanup failures mask the import error
+                    current_app.logger.warning(
+                        f"Failed to delete temporary file {file_name}: {e}"
+                    )
+        return
+    if extension.lower() == "gramps":
+        # Remove mediapath tag from Gramps XML files before import
+        # This is necessary because the mediapath tag can cause import failures
+        try:
+            remove_mediapath_from_gramps_xml(file_name)
+        except Exception as e:
+            # Log the error but continue with import attempt
+            current_app.logger.warning(
+                f"Failed to remove mediapath tag from {file_name}: {e}"
+            )
     plugin_manager = BasePluginManager.get_instance()
     for plugin in plugin_manager.get_import_plugins():
         if extension == plugin.get_extension():
@@ -1272,12 +1760,27 @@ def run_import(
 
 def dry_run_import(
     file_name: FilenameOrPath,
+    extension: str,
 ) -> Optional[dict[str, int]]:
     """Import a file into an in-memory database and returns object counts."""
-    db_handle: DbReadBase = import_as_dict(filename=file_name, user=User())
-    if db_handle is None:
-        return None
-    return {
+    db_handle = make_database("sqlite")
+    db_handle.load(":memory:")
+    db_handle.set_feature("skip-import-additions", True)
+    db_handle.set_prefixes(
+        config.get("preferences.iprefix"),
+        config.get("preferences.oprefix"),
+        config.get("preferences.fprefix"),
+        config.get("preferences.sprefix"),
+        config.get("preferences.cprefix"),
+        config.get("preferences.pprefix"),
+        config.get("preferences.eprefix"),
+        config.get("preferences.rprefix"),
+        config.get("preferences.nprefix"),
+    )
+    run_import(
+        db_handle=db_handle, file_name=file_name, extension=extension, delete=False
+    )
+    result = {
         "people": db_handle.get_number_of_people(),
         "families": db_handle.get_number_of_families(),
         "sources": db_handle.get_number_of_sources(),
@@ -1289,6 +1792,8 @@ def dry_run_import(
         "notes": db_handle.get_number_of_notes(),
         "tags": db_handle.get_number_of_tags(),
     }
+    db_handle.close()
+    return result
 
 
 def app_has_semantic_search() -> bool:

@@ -29,13 +29,20 @@ from gramps.gen.lib import Family, Person
 from gramps.gen.lib.primaryobj import BasicPrimaryObject as GrampsObject
 
 # from gramps.gen.lib.serialize import from_json
+from marshmallow import Schema
 from webargs import fields, validate
 
 from gramps_webapi.types import ResponseReturnValue
 
-from ...auth.const import PERM_ADD_OBJ, PERM_DEL_OBJ_BATCH, PERM_EDIT_OBJ
+from ...auth.const import (
+    PERM_ADD_OBJ,
+    PERM_DEL_OBJ,
+    PERM_DEL_OBJ_BATCH,
+    PERM_EDIT_OBJ,
+)
 from ...const import GRAMPS_OBJECT_PLURAL
 from ..auth import require_permissions
+from ..blueprint import api_blueprint
 from ..tasks import (
     AsyncResult,
     delete_objects,
@@ -50,9 +57,10 @@ from ..util import (
     get_tree_from_jwt_or_fail,
     gramps_object_from_dict,
     update_usage_people,
-    use_args,
 )
 from . import FreshProtectedResource, ProtectedResource
+from .delete import delete_objects_by_handle, remove_deleted_from_search_indices
+from .schemas import TaskReferenceSchema, TransactionSchema
 from .util import add_object, fix_object_dict, transaction_to_json, validate_object_dict
 
 
@@ -74,6 +82,7 @@ class CreateObjectsResource(ProtectedResource):
             objects.append(obj)
         return objects
 
+    @api_blueprint.response(201, TransactionSchema(many=True))
     def post(self) -> ResponseReturnValue:
         """Post the objects."""
         require_permissions([PERM_ADD_OBJ])
@@ -116,20 +125,23 @@ class CreateObjectsResource(ProtectedResource):
         return res
 
 
+class DeleteObjectsQueryArgs(Schema):
+    """Query arguments for POST /objects/delete."""
+
+    namespaces = fields.DelimitedList(
+        fields.Str(validate=validate.Length(min=1)),
+        validate=validate.ContainsOnly(choices=list(GRAMPS_OBJECT_PLURAL.values())),
+        metadata={
+            "description": "Comma-delimited list of object types to delete (e.g. 'people,families,events')."
+        },
+    )
+
+
 class DeleteObjectsResource(FreshProtectedResource):
     """Resource for deleting multiple objects."""
 
-    @use_args(
-        {
-            "namespaces": fields.DelimitedList(
-                fields.Str(validate=validate.Length(min=1)),
-                validate=validate.ContainsOnly(
-                    choices=list(GRAMPS_OBJECT_PLURAL.values())
-                ),
-            ),
-        },
-        location="query",
-    )
+    @api_blueprint.response(200, TaskReferenceSchema())
+    @api_blueprint.arguments(DeleteObjectsQueryArgs, location="query")
     def post(self, args) -> ResponseReturnValue:
         """Delete the objects."""
         require_permissions([PERM_DEL_OBJ_BATCH])
@@ -144,3 +156,56 @@ class DeleteObjectsResource(FreshProtectedResource):
         if isinstance(task, AsyncResult):
             return make_task_response(task)
         return jsonify(task), 200
+
+
+class DeleteObjectsByHandleArgs(Schema):
+    """Request body for POST /objects/delete-by-handle."""
+
+    namespace = fields.Str(
+        required=True,
+        validate=validate.OneOf(list(GRAMPS_OBJECT_PLURAL.values())),
+        metadata={
+            "description": "Object type of the objects to delete (e.g. 'people')."
+        },
+    )
+    handles = fields.List(
+        fields.Str(validate=validate.Length(min=1)),
+        required=True,
+        validate=validate.Length(min=1),
+        metadata={"description": "List of handles of the objects to delete."},
+    )
+
+
+class DeleteObjectsByHandleResource(ProtectedResource):
+    """Resource for deleting specific objects of one type by handle."""
+
+    @api_blueprint.response(200, TransactionSchema(many=True))
+    @api_blueprint.arguments(DeleteObjectsByHandleArgs, location="json")
+    def post(self, args) -> ResponseReturnValue:
+        """Delete the objects."""
+        require_permissions([PERM_DEL_OBJ])
+        db_handle = get_db_handle(readonly=False)
+        trans_dict = delete_objects_by_handle(
+            db_handle=db_handle,
+            namespace=args["namespace"],
+            handles=args["handles"],
+        )
+        if args["namespace"] == GRAMPS_OBJECT_PLURAL["Person"]:
+            update_usage_people()
+        tree = get_tree_from_jwt_or_fail()
+        trans_dict_to_reindex = remove_deleted_from_search_indices(tree, trans_dict)
+        # additions/updates require (re)computing embeddings: do it in the background
+        if trans_dict_to_reindex:
+            run_task(
+                update_search_indices_from_transaction,
+                trans_dict=trans_dict_to_reindex,
+                tree=tree,
+                user_id=get_jwt_identity(),
+            )
+        res = Response(
+            response=json.dumps(trans_dict),
+            status=200,
+            mimetype="application/json",
+        )
+        res.headers.add("X-Total-Count", str(len(trans_dict)))
+        return res
