@@ -22,7 +22,7 @@
 import json
 
 from marshmallow import Schema
-from flask import Response, request
+from flask import Response
 from flask_jwt_extended import get_jwt_identity
 from gramps.gen.db.dbconst import TXNADD, TXNDEL, TXNUPD
 from webargs import fields
@@ -69,11 +69,11 @@ class TransactionsResource(ProtectedResource):
     """Resource for raw database transactions."""
 
     @api_blueprint.response(200, TransactionSchema(many=True))
+    @api_blueprint.arguments(TransactionSchema(many=True), location="json")
     @api_blueprint.arguments(TransactionsQueryArgs, location="query")
-    def post(self, args) -> ResponseReturnValue:
+    def post(self, payload, args) -> ResponseReturnValue:
         """Post the transaction."""
         require_permissions([PERM_ADD_OBJ, PERM_EDIT_OBJ, PERM_DEL_OBJ])
-        payload = request.json
         if not payload:
             abort_with_message(400, "Empty payload")
         is_undo = args["undo"]
@@ -95,7 +95,11 @@ class TransactionsResource(ProtectedResource):
             return task, 200
         try:
             trans_dict = process_transactions(
-                tree=tree, user_id=user_id, payload=payload, force=args["force"], message=args["message"]
+                tree=tree,
+                user_id=user_id,
+                payload=payload,
+                force=args["force"],
+                message=args["message"],
             )
         except ValueError as exc:
             abort_with_message(400, str(exc))

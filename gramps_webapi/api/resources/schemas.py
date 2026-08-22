@@ -1,9 +1,11 @@
 """Response schemas for the Gramps Web API.
 
-Each class defines the shape of a response object and is used exclusively for
-OpenAPI documentation via flask-smorest ``@api_blueprint.response()``; they do
+Each class defines the shape of a response object and is used for OpenAPI
+documentation via flask-smorest ``@api_blueprint.response()``; they mostly do
 **not** perform serialisation because most endpoints return a pre-built Flask
-``Response`` object that flask-smorest passes through unchanged.
+``Response`` object that flask-smorest passes through unchanged. A few are also
+used with ``@api_blueprint.arguments()`` to validate a request body, in which
+case their ``required``/``validate`` constraints are enforced on load.
 
 All schemas set ``Meta.unknown = INCLUDE`` so that no data is silently dropped
 if one of these schemas is accidentally used for de-serialisation, and to avoid
@@ -1800,19 +1802,27 @@ class TransactionSchema(_Base):
     """A single object-level change within a committed transaction."""
 
     type = fields.Str(
+        required=True,
+        validate=validate.OneOf(["add", "update", "delete"]),
         metadata={"description": "Action type: 'add', 'update', or 'delete'."},
     )
     _class = fields.Str(
+        required=True,
         data_key="_class",
         metadata={"description": "Object class name (e.g. 'Person', 'Event')."},
     )
     handle = fields.Str(
+        required=True,
         metadata={"description": "Handle of the affected object."},
     )
     old = fields.Raw(
+        required=True,
+        allow_none=True,
         metadata={"description": "Object state before the change (null for adds)."},
     )
     new = fields.Raw(
+        required=True,
+        allow_none=True,
         metadata={"description": "Object state after the change (null for deletes)."},
     )
 

@@ -96,7 +96,7 @@ class TestTransactionResource(unittest.TestCase):
             # these three roles should not be able to post a transaction!
             headers = get_headers(self.client, username, "123")
             rv = self.client.post(
-                "/api/transactions/?background=1", json=obj, headers=headers
+                "/api/transactions/?background=1", json=trans, headers=headers
             )
             self.assertEqual(rv.status_code, 403)
         headers = get_headers(self.client, "editor", "123")
@@ -381,7 +381,7 @@ class TestTransactionResource(unittest.TestCase):
         rv = self.client.post(
             "/api/transactions/?background=1", json=trans, headers=headers
         )
-        self.assertEqual(rv.status_code, 500)
+        self.assertEqual(rv.status_code, 422)
 
     def test_missing_gramps_id(self):
         """Add with missing gramps ID."""
@@ -400,6 +400,26 @@ class TestTransactionResource(unittest.TestCase):
             "/api/transactions/?background=1", json=trans, headers=headers
         )
         self.assertEqual(rv.status_code, 500)
+
+    def test_payload_not_a_list(self):
+        """A bare change object instead of a list is a client error, not a 500."""
+        handle = make_handle()
+        obj = {
+            "_class": "Note",
+            "handle": handle,
+            "text": {"_class": "StyledText", "string": "My first note."},
+            "gramps_id": "N41",
+        }
+        item = {
+            "type": "add",
+            "_class": "Note",
+            "handle": handle,
+            "old": None,
+            "new": obj,
+        }
+        headers = get_headers(self.client, "editor", "123")
+        rv = self.client.post("/api/transactions/", json=item, headers=headers)
+        self.assertEqual(rv.status_code, 422)
 
     def test_background_returns_task_object(self):
         """When Celery is active, POST /transactions/?background=1 must return
