@@ -1244,6 +1244,39 @@ def add_object(
         raise ValueError("Database does not support writing.")
 
 
+def _get_added_family_member(
+    db_handle: DbWriteBase, handle: Handle, obj: Family
+) -> Person:
+    """Fetch a person newly referenced by a family being committed.
+
+    Aborts with 422 if the person does not exist.
+    """
+    try:
+        return db_handle.get_person_from_handle(handle)
+    except HandleError:
+        abort_with_message(
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            f"Person referenced by family does not exist: {handle}",
+        )
+
+
+def _get_removed_family_member(
+    db_handle: DbWriteBase, handle: Handle, obj: Family
+) -> Optional[Person]:
+    """Fetch a person no longer referenced by a family being committed.
+
+    Returns None if the person does not exist, so that an edit dropping a
+    broken reference can go through.
+    """
+    try:
+        return db_handle.get_person_from_handle(handle)
+    except HandleError:
+        _LOG.warning(
+            "Broken person reference %s in family %s, ignoring", handle, obj.handle
+        )
+        return None
+
+
 def add_family_update_refs(
     db_handle: DbWriteBase,
     obj: Family,
@@ -1256,12 +1289,12 @@ def add_family_update_refs(
     # add family handle to parents
     for handle in [obj.get_father_handle(), obj.get_mother_handle()]:
         if handle:
-            parent = db_handle.get_person_from_handle(handle)
+            parent = _get_added_family_member(db_handle, handle, obj)
             parent.add_family_handle(obj.handle)
             db_handle.commit_person(parent, trans)
     # for each child, add the family handle to the child
     for ref in obj.get_child_ref_list():
-        child = db_handle.get_person_from_handle(ref.ref)
+        child = _get_added_family_member(db_handle, ref.ref, obj)
         child.add_parent_family_handle(obj.handle)
         db_handle.commit_person(child, trans)
 
@@ -1566,13 +1599,15 @@ def update_family_update_refs(
 
     # remove the family from children which have been removed
     for ref in orig_set - new_set:
-        person = db_handle.get_person_from_handle(ref)
+        person = _get_removed_family_member(db_handle, ref, obj)
+        if person is None:
+            continue
         person.remove_parent_family_handle(obj.handle)
         db_handle.commit_person(person, trans)
 
     # add the family to children which have been added
     for ref in new_set - orig_set:
-        person = db_handle.get_person_from_handle(ref)
+        person = _get_added_family_member(db_handle, ref, obj)
         person.add_parent_family_handle(obj.handle)
         db_handle.commit_person(person, trans)
 
@@ -1582,12 +1617,13 @@ def _fix_parent_handles(
 ) -> None:
     if orig_handle != new_handle:
         if orig_handle:
-            person = db_handle.get_person_from_handle(orig_handle)
-            person.family_list.remove(obj.handle)
-            db_handle.commit_person(person, trans)
+            person = _get_removed_family_member(db_handle, orig_handle, obj)
+            if person is not None and obj.handle in person.family_list:
+                person.family_list.remove(obj.handle)
+                db_handle.commit_person(person, trans)
         if new_handle:
-            person = db_handle.get_person_from_handle(new_handle)
-            person.family_list.append(obj.handle)
+            person = _get_added_family_member(db_handle, new_handle, obj)
+            person.add_family_handle(obj.handle)
             db_handle.commit_person(person, trans)
 
 
