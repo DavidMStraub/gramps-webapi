@@ -98,7 +98,10 @@ class ImporterFileQueryArgs(Schema):
 class ImporterFileResource(ProtectedResource):
     """Import file resource."""
 
-    @api_blueprint.response(200, ImportResultSchema())
+    @api_blueprint.response(201, ImportResultSchema())
+    @api_blueprint.alt_response(
+        200, schema=ImportResultSchema(), description="Dry run result."
+    )
     @api_blueprint.arguments(ImporterFileQueryArgs, location="query")
     def post(self, args: dict, extension: str) -> ResponseReturnValue:
         """Import file."""
