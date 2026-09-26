@@ -586,14 +586,17 @@ class TestUser(unittest.TestCase):
         assert rv.status_code == 403
 
     def test_show_users_filter_by_unknown_tree(self):
-        """An unknown tree ID is rejected, for admins and non-admins alike."""
-        for username in ["admin", "owner"]:
+        """An unknown tree ID is a 422 for admins, but a 403 for others.
+
+        Users without access to other trees must not learn which tree IDs exist.
+        """
+        for username, status_code in [("admin", 422), ("owner", 403)]:
             token = self._get_token(username)
             rv = self.client.get(
                 BASE_URL + "/users/?tree=not_exists",
                 headers={"Authorization": f"Bearer {token}"},
             )
-            assert rv.status_code == 422, username
+            assert rv.status_code == status_code, username
 
     def test_show_users_filter_by_role(self):
         """The user list can be restricted to one or several roles."""

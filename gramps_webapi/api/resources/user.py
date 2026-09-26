@@ -34,12 +34,12 @@ from ...auth import (
     add_users,
     authorized,
     delete_user,
-    get_all_user_details,
     get_guid,
     get_name,
     get_number_users,
     get_pwhash,
     get_user_details,
+    get_user_details_page,
     get_user_oidc_accounts,
     modify_user,
 )
@@ -163,14 +163,12 @@ class UsersListArgsSchema(Schema):
     )
     role = fields.DelimitedList(
         fields.Int(),
-        load_default=None,
         metadata={
             "description": "Filter to users having any of these integer role IDs,"
             " e.g. `-2,-1` for unconfirmed and disabled accounts."
         },
     )
     page = fields.Integer(
-        load_default=0,
         validate=validate.Range(min=1),
         metadata={
             "description": "Page number of the result subset to return."
@@ -194,28 +192,18 @@ class UsersResource(ProtectedResource):
         # Always include OIDC account information if OIDC is enabled
         include_oidc = is_oidc_enabled()
 
-        # validated before the permission checks, like in POST /users/, so that
-        # a bad tree ID is always reported as such rather than as a 403
-        if args["tree"] is not None and not tree_exists(args["tree"]):
-            abort_with_message(422, "Tree does not exist")
-
         if has_permissions([PERM_VIEW_OTHER_TREE_USER]):
             if args["tree"] is not None:
+                # checked only here, so that users without access to other
+                # trees cannot probe which tree IDs exist
+                if not tree_exists(args["tree"]):
+                    abort_with_message(422, "Tree does not exist")
                 # return only the requested tree's users; treeless site admins
                 # belong to no tree, so they are not part of the result
-                details = get_all_user_details(
-                    tree=args["tree"],
-                    include_guid=True,
-                    include_oidc_accounts=include_oidc,
-                )
+                scope = {"tree": args["tree"]}
             else:
                 # return all users from all trees
-                details = get_all_user_details(
-                    tree=None,
-                    all_trees=True,
-                    include_guid=True,
-                    include_oidc_accounts=include_oidc,
-                )
+                scope = {"tree": None, "all_trees": True}
         else:
             require_permissions([PERM_VIEW_OTHER_USER])
             tree = get_tree_from_jwt()
@@ -224,28 +212,19 @@ class UsersResource(ProtectedResource):
             # return only this tree's users
             # only include treeless users in single-tree setup
             is_single = current_app.config["TREE"] != TREE_MULTI
-            details = get_all_user_details(
-                tree=tree,
-                include_treeless=is_single,
-                include_guid=True,
-                include_oidc_accounts=include_oidc,
-            )
+            scope = {"tree": tree, "include_treeless": is_single}
 
-        if args["user_id"] is not None:
-            # Filter in Python against the already permission-scoped list so
-            # tree/permission boundaries are always respected.
-            details = [d for d in details if d["user_id"] == args["user_id"]]
-
-        if args["role"] is not None:
-            roles = set(args["role"])
-            details = [d for d in details if d["role"] in roles]
-
-        # the underlying query is unordered, so sort to make paging stable
-        details.sort(key=lambda detail: detail["name"])
-        total_count = len(details)
-        if args["page"] > 0:
-            offset = (args["page"] - 1) * args["pagesize"]
-            details = details[offset : offset + args["pagesize"]]
+        # the filters are applied on top of the permission-scoped query, so
+        # tree/permission boundaries are always respected
+        details, total_count = get_user_details_page(
+            **scope,
+            user_id=args["user_id"],
+            roles=args.get("role"),
+            page=args.get("page"),
+            pagesize=args["pagesize"],
+            include_guid=True,
+            include_oidc_accounts=include_oidc,
+        )
 
         res = jsonify(details)
         res.headers.add("X-Total-Count", str(total_count))
@@ -468,14 +447,12 @@ class UserResource(UserChangeBase):
             # only admins can create new admin users
             require_permissions([PERM_MAKE_ADMIN])
         tree = get_tree_from_jwt()
-        # validated before the permission check, like in POST /users/, so that
-        # a bad tree ID is always reported as such rather than as a 403
-        if args.get("tree") and not tree_exists(args["tree"]):
-            abort_with_message(422, "Tree does not exist")
         if not args.get("tree") or tree == args.get("tree"):
             require_permissions([PERM_ADD_USER])
         else:
             require_permissions([PERM_ADD_OTHER_TREE_USER])
+            if not tree_exists(args["tree"]):
+                abort_with_message(422, "Tree does not exist")
         new_tree = args.get("tree") or tree
         if (
             not new_tree
