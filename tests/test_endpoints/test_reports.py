@@ -147,6 +147,11 @@ class TestReportsReportIdFile(unittest.TestCase):
             self,
             TEST_URL + 'ancestor_report/file?options={"one_three": "four_two"}',
         )
+        check_invalid_semantics(
+            self,
+            TEST_URL + 'ancestor_report/file?options=["of"]',
+        )
+        check_invalid_semantics(self, TEST_URL + "ancestor_report/file?options=5")
 
     def test_get_reports_report_id_file_parameter_options_validate_semantics_booleans(
         self,
@@ -212,7 +217,7 @@ class TestReportsReportIdFile(unittest.TestCase):
         )
         check_invalid_semantics(
             self,
-            TEST_URL + 'familylines_graph/file?options={"gidlist": "I0044 I9999"}',
+            TEST_URL + 'place_report/file?options={"places": "P0863 P9999"}',
         )
 
     def test_get_reports_report_id_file_parameter_options_validate_semantics_lists(
@@ -245,6 +250,12 @@ class TestReportsReportIdFile(unittest.TestCase):
             self, TEST_URL + 'ancestor_report/file?options={"off": "odt"}', full=True
         )
         self.assertEqual(rv.mimetype, types_map[".odt"])
+        check_invalid_semantics(
+            self, TEST_URL + 'ancestor_report/file?options={"off": "xyz"}'
+        )
+        check_invalid_semantics(
+            self, TEST_URL + 'ancestor_report/file?options={"off": 5}'
+        )
 
     def test_get_reports_report_localized_content(self):
         """Test that localized output works."""

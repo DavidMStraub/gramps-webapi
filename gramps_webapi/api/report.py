@@ -360,16 +360,6 @@ def run_report(
                 abort(404)
             if "off" not in report_options:
                 report_options["off"] = REPORT_DEFAULTS[report_data.category]
-            file_type = "." + report_options["off"]
-            file_type = _EXTENSION_MAP.get(file_type) or file_type
-            if file_type not in MIME_TYPES:
-                current_app.logger.error(f"Cannot find {file_type} in MIME_TYPES")
-                abort_with_message(500, f"MIME type {file_type} not found")
-            report_path = current_app.config.get("REPORT_DIR")
-            assert report_path is not None, "REPORT_DIR not set in config"
-            os.makedirs(report_path, exist_ok=True)
-            file_name = f"{uuid.uuid4()}{file_type}"
-            report_options["of"] = os.path.join(report_path, file_name)
             module = plugin_manager.load_plugin(report_data)
             option_class = getattr(module, report_data.optionclass)
             report_class = getattr(module, report_data.reportclass)
@@ -393,6 +383,17 @@ def run_report(
                 report_options,
                 allow_file=allow_file,
             )
+            # only after validation, so an invalid output format is a 422
+            file_type = "." + report_options["off"]
+            file_type = _EXTENSION_MAP.get(file_type) or file_type
+            if file_type not in MIME_TYPES:
+                current_app.logger.error(f"Cannot find {file_type} in MIME_TYPES")
+                abort_with_message(500, f"MIME type {file_type} not found")
+            report_path = current_app.config.get("REPORT_DIR")
+            assert report_path is not None, "REPORT_DIR not set in config"
+            os.makedirs(report_path, exist_ok=True)
+            file_name = f"{uuid.uuid4()}{file_type}"
+            report_options["of"] = os.path.join(report_path, file_name)
             if (
                 language
                 and "trans" in default_report.options_dict
@@ -450,7 +451,7 @@ def validate_options(
     """
     if report_id == "familylines_graph":
         if "gidlist" not in report_options or not report_options["gidlist"]:
-            abort(422)
+            abort_with_message(422, "Option gidlist is required")
     menu = getattr(report.option_class, "menu", None)
     menu_options = (
         {name: menu.get_option_by_name(name) for name in menu.get_all_option_names()}
